@@ -1,0 +1,21 @@
+# 预览产物
+previews/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+
+# 运行数据
+data/
+
+# 环境 / 编辑器
+.venv/
+venv/
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
