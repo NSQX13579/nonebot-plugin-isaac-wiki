@@ -276,6 +276,27 @@ CHROME_JS = """
     const wrap = table.closest('.table-responsive');
     if (wrap) { wrap.classList.add('isaac-hide'); n++; }
   }
+  // 浮动在卡片上的分类徽章（右上角「道具 / 卡牌 / 饰品…」）：
+  // 绝对定位、纯中文短文本、贴着卡片顶部
+  const rr = root.getBoundingClientRect();
+  for (const el of Array.from(root.querySelectorAll('*'))) {
+    const cs = getComputedStyle(el);
+    if (cs.position !== 'absolute' && cs.position !== 'fixed') continue;
+    const r = el.getBoundingClientRect();
+    if (r.width < 10 || r.height < 8) continue;
+    const t = (el.innerText || '').trim();
+    const looksLikeBadge = t.length > 0 && t.length <= 8
+      && /^[A-Za-z\\u4e00-\\u9fa5]+$/.test(t);
+    const atTop = r.top - rr.top < 140;
+    const outOfCard = r.right > rr.right + 2;
+    if (outOfCard || (looksLikeBadge && atTop)) { el.classList.add('isaac-hide'); n++; }
+  }
+  // 全站通知 / 弹层：按「我知道了」这类关闭按钮识别
+  for (const el of Array.from(document.querySelectorAll('div, section, aside'))) {
+    const t = el.innerText || '';
+    if (t.length > 600) continue;
+    if (/全站通知|我知道了|本站讯/.test(t)) { el.classList.add('isaac-hide'); n++; }
+  }
   return n;
 }
 """
@@ -364,8 +385,18 @@ class CardResult:
 
 async def _load(browser_wiki, title: str, *, attempts: int = 3) -> bool:
     """导航并等到「真内容」；wiki 会间歇返回未渲染的空壳，检测到就重载。"""
+    import json
+
     page = browser_wiki.page
     url = await browser_wiki.page_url(title)
+    slug = url.split("/wiki/", 1)[-1]
+    # 必须确认「已经在目标页」——否则上一页的 DOM 会让内容检查立刻通过
+    ready_js = (
+        "() => { if (!location.href.includes(" + json.dumps(slug) + ")) return false;"
+        " const r = document.querySelector('.mw-parser-output');"
+        " return !!r && (r.querySelectorAll('h2,h3,h4,h5,h6').length > 0"
+        " || r.innerHTML.length > 20000); }"
+    )
     for _ in range(attempts):
         try:
             await page.goto(url, wait_until="commit", timeout=15000)
@@ -374,7 +405,7 @@ async def _load(browser_wiki, title: str, *, attempts: int = 3) -> bool:
         for _ in range(40):  # 最多约 20 秒
             await page.wait_for_timeout(500)
             try:
-                if await page.evaluate(CONTENT_READY_JS):
+                if await page.evaluate(ready_js):
                     return True
             except Exception:  # noqa: BLE001
                 continue
