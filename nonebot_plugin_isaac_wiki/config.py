@@ -22,3 +22,5 @@ class Config(BaseModel):
 
     # 浏览器
     isaac_wiki_idle_close_minutes: int = 10   # 空闲多久关掉浏览器
+    isaac_wiki_proxy: str = ""                # 浏览器与接口走代理（如 http://127.0.0.1:7890）
+    isaac_wiki_channel: str = ""              # 用真浏览器内核：chrome / msedge（留空用自带 chromium）

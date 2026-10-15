@@ -220,10 +220,13 @@ def test_cfg_uses_plugin_config_and_reads_env(monkeypatch):
 
 
 def test_render_feedback_wires_config_into_engine(isolated, monkeypatch):
-    """命令层要把配置（含空闲回收分钟数）原样交给 engine。"""
+    """命令层要把配置（含代理、空闲回收分钟数）原样交给 engine 和浏览器。"""
+    monkeypatch.setenv("ISAAC_WIKI_PROXY", "http://127.0.0.1:7890")
     wiki = _FakeWiki()
+    seen: dict = {}
 
-    async def fake_get_wiki(headless, timeout):
+    async def fake_get_wiki(headless, timeout, proxy="", channel=""):
+        seen["proxy"] = proxy
         return wiki
 
     monkeypatch.setattr(engine, "_get_wiki", fake_get_wiki)
@@ -238,13 +241,15 @@ def test_render_feedback_wires_config_into_engine(isolated, monkeypatch):
     assert bot.deleted == [1], "出图后应该撤回「正在查询」的回执"
     kwargs = spy.call_args.kwargs
     assert kwargs["idle_close_minutes"] == 10
+    assert kwargs["proxy"] == "http://127.0.0.1:7890"
+    assert seen["proxy"] == "http://127.0.0.1:7890", "浏览器那条路也要带上代理"
     assert kwargs["width"] == 760
     assert kwargs["use_cache"] is True
 
 
 def test_missing_browser_degrades_to_a_text_reply(isolated, monkeypatch):
     """没装 playwright 时要有明确回复，不能静默抛异常。"""
-    async def broken_get_wiki(headless, timeout):
+    async def broken_get_wiki(headless, timeout, proxy="", channel=""):
         raise ImportError("No module named 'playwright'")
 
     monkeypatch.setattr(engine, "_get_wiki", broken_get_wiki)
@@ -262,7 +267,7 @@ def test_missing_browser_degrades_to_a_text_reply(isolated, monkeypatch):
 
 def test_failure_reply_carries_the_real_cause(isolated, monkeypatch):
     """服务器上报错只有「（RuntimeError）」等于没线索：要带上真实状态码和原因。"""
-    async def broken_get_wiki(headless, timeout):
+    async def broken_get_wiki(headless, timeout, proxy="", channel=""):
         raise RuntimeError("wiki api status 403: 'Just a moment...'")
 
     monkeypatch.setattr(engine, "_get_wiki", broken_get_wiki)
@@ -289,10 +294,61 @@ def test_env_hint_maps_common_deploy_problems():
     assert "pip install playwright" in c._env_hint(
         ImportError("No module named 'playwright'"))
     assert c._env_hint(RuntimeError("wiki api status 403: 'Just a moment...'")) == ""
+    assert "ISAAC_WIKI_PROXY" in c._env_hint(
+        RuntimeError("Cloudflare 挑战未通过（服务器出网 IP 被判成机器人）"))
 
     # 服务器以 root 跑时，启动参数里必须自带 --no-sandbox，否则 Chromium 直接拒绝启动
     args = source.launch_args()
     assert "--disable-blink-features=AutomationControlled" in args
+
+
+def test_proxy_reaches_browser_launch_options():
+    """代理要真的落到 playwright 的启动参数上（页面内 fetch 也跟着走）。"""
+    from nonebot_plugin_isaac_wiki import source
+
+    plain = source.launch_options(True)
+    assert "proxy" not in plain
+    assert plain["headless"] is True
+
+    with_proxy = source.launch_options(True, "http://127.0.0.1:7890")
+    assert with_proxy["proxy"] == {"server": "http://127.0.0.1:7890"}
+
+    with_channel = source.launch_options(True, "", "chrome")
+    # Windows 本地会优先复用系统 Edge，其它平台才用 channel
+    if source.system_edge():
+        assert "channel" not in with_channel
+    else:
+        assert with_channel["channel"] == "chrome"
+
+
+def test_clean_ua_drops_the_headless_token():
+    """默认 UA 里的 HeadlessChrome 是 Cloudflare 的明确信号，必须清掉。"""
+    from nonebot_plugin_isaac_wiki import source
+
+    headless_ua = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                   "(KHTML, like Gecko) HeadlessChrome/141.0.0.0 Safari/537.36")
+
+    class _FakePage:
+        async def evaluate(self, expr):
+            return headless_ua
+
+    class _FakeContext:
+        async def new_page(self):
+            return _FakePage()
+
+        async def close(self):
+            pass
+
+    class _FakeBrowser:
+        async def new_context(self, **kwargs):
+            return _FakeContext()
+
+    wiki = source.BrowserWiki(headless=True)
+    wiki._browser = _FakeBrowser()
+    ua = asyncio.run(wiki._clean_ua())
+
+    assert "Headless" not in ua
+    assert "Chrome/141" in ua
 
 
 # --- 缓存清理 ---------------------------------------------------------------

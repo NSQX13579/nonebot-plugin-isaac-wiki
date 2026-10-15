@@ -61,6 +61,7 @@
   ```bash
   cd /home/goat/src/plugins && /usr/local/bin/python3.12 nonebot_plugin_isaac_wiki/selfcheck.py
   ```
+  它会打印启动参数、是否走代理/用哪个内核、当前 UA、是否撞上挑战页——服务器上排查一次就够。
 
 ### 测试
 
@@ -73,6 +74,13 @@
 1. `/api.php` 被 Cloudflare 挡；**必须在真实浏览器页面里 `fetch`** 才能调通
    （复制 cookie 给 httpx 也没用，`__cf_bm` 绑 TLS 指纹）。
    页内 fetch 仍被 403 时，`source.api()` 会再用**顶层导航**取一次（文档请求更容易过）。
+   **UA 是决定性的**：Playwright 默认 UA 里带 `HeadlessChrome`，实测同一台机器同一个 IP，
+   默认 UA 会被挑战（页面停在「请稍候…」、正文 121 字），**只要把 `Headless` 字样去掉就放行**。
+   所以 `BrowserWiki.start()` 现在先问浏览器自报 UA、清掉 `Headless` 再建 context——
+   别改成硬编码的假 UA（版本对不上），也别图省事删掉这一步。
+   机房 IP 仍可能被拦，三个旋钮按顺序试：`ISAAC_WIKI_CHANNEL=chrome`（装真 Chrome）、
+   `ISAAC_WIKI_HEADLESS=false` + `xvfb-run`（有头）、`ISAAC_WIKI_PROXY`（住宅代理）。
+   判断是不是挑战页：看 `wiki.challenged`（selfcheck 第 2 步会打印）与标题是否「请稍候…」。
 2. 页面正文是 JS 渲染的，会**间歇返回空壳**（6KB、0 个分节）→ 要检测并重载。
    注意「空壳」的判据**不能拿 URL 比**：wiki 会把别名重定向（`硫磺火` → `C118`），
    比请求时的 URL 会永远等不到「落地」、白等 60 秒后误报「页面未能渲染」。

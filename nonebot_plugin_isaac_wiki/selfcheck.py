@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import os
 import sys
 import tempfile
 import types
@@ -34,6 +35,8 @@ else:
     from . import card, source
 
 TITLE = "硫磺火"
+PROXY = os.environ.get("ISAAC_WIKI_PROXY", "").strip()
+CHANNEL = os.environ.get("ISAAC_WIKI_CHANNEL", "").strip()
 failures = 0
 
 
@@ -68,6 +71,8 @@ async def check_browser() -> None:
         bad(exc)
         return
     print(f"     启动参数: {' '.join(source.launch_args())}", flush=True)
+    print(f"     代理: {PROXY or '（未设置，直连）'}", flush=True)
+    print(f"     内核: {CHANNEL or '（Playwright 自带 chromium）'}", flush=True)
     edge = source.system_edge()
     if edge:
         # Windows 本地开发会复用系统 Edge，Playwright 自带的 chromium 没装也没关系
@@ -92,7 +97,7 @@ async def check_browser() -> None:
 
 
 async def check_steps() -> None:
-    wiki = source.BrowserWiki(headless=True)
+    wiki = source.BrowserWiki(headless=True, proxy=PROXY, channel=CHANNEL)
     try:
         step("2/5 启动浏览器 + 打开 wiki")
         await wiki.start()
@@ -103,7 +108,8 @@ async def check_steps() -> None:
             "() => document.body ? document.body.innerText.length : 0"
         )
         print(f"     url={url}\n     标题={title}  正文字数={length}"
-              f"  拿到正文={wiki.content_ok}", flush=True)
+              f"  拿到正文={wiki.content_ok}  撞上挑战页={wiki.challenged}", flush=True)
+        print(f"     UA: {wiki.user_agent}", flush=True)
         ok()
     except Exception as exc:  # noqa: BLE001
         bad(exc)

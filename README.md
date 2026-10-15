@@ -46,6 +46,8 @@
 | `ISAAC_WIKI_CACHE_MB` | 500 | 卡片缓存总量上限 |
 | `ISAAC_WIKI_CACHE_TTL_DAYS` | 7 | 缓存有效期（天） |
 | `ISAAC_WIKI_IDLE_CLOSE_MINUTES` | 10 | 空闲多久关掉浏览器（0 = 不关） |
+| `ISAAC_WIKI_PROXY` | 空 | 浏览器与接口走代理，如 `http://127.0.0.1:7890`；wiki 拦服务器 IP 时用 |
+| `ISAAC_WIKI_CHANNEL` | 空 | 用真浏览器内核：装了 Chrome 就填 `chrome`（比自带 chromium 更容易过 Cloudflare） |
 
 ## 坑
 
@@ -53,5 +55,9 @@
   （`__cf_bm` 绑 TLS 指纹）。所以查询和截图都在同一个常驻 Chromium 里做。
 - 正文是 JS 渲染的，偶尔返回空壳，插件会检测并重载；信息框贴图只在滚进视口时才绘制。
 - 于是进程会常驻一个浏览器（10 分钟不用自动关，bot 退出时会回收）。改了配置要重启 bot。
+- wiki 的 Cloudflare 会按环境和 IP 判机器人（页面停在「请稍候…」、接口 403）。插件已经
+  把 UA 里 `HeadlessChrome` 的字样清掉（实测这一条就会决定放行还是被挑战）；机房 IP 仍可能
+  被拦，这时依次试 `ISAAC_WIKI_CHANNEL=chrome`（装真 Chrome）、`ISAAC_WIKI_HEADLESS=false`
+  + `xvfb-run`（有头模式）、`ISAAC_WIKI_PROXY`（住宅代理）。用 selfcheck 一眼看是哪种情况。
 
 设计细节、踩过的坑和本地验证方法见 [`docs/HANDOFF.md`](docs/HANDOFF.md)。

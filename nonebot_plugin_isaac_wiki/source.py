@@ -17,6 +17,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -28,17 +29,11 @@ API = "https://isaac.huijiwiki.com/api.php"
 BASE = "https://isaac.huijiwiki.com"
 HOME = f"{BASE}/wiki/%E9%A6%96%E9%A1%B5"
 
-UA = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 Edg/126.0.0.0"
-)
-
 # Windows 本地开发时复用系统 Edge，省得再下 Playwright 浏览器
 EDGE_PATHS = (
     r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
     r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
 )
-
 
 def system_edge() -> str | None:
     if os.name != "nt":
@@ -65,6 +60,25 @@ def launch_args() -> list[str]:
     return args
 
 
+def launch_options(headless: bool, proxy: str = "", channel: str = "") -> dict[str, Any]:
+    """浏览器启动参数（纯函数，方便单测）。
+
+    ``proxy`` 走 Playwright 的启动代理，页面内的 ``fetch`` 也自动跟着走——
+    服务器 IP 被 Cloudflare 挑战时，配一个能过的代理就行。
+    ``channel`` 可以指定 ``chrome`` / ``msedge``：装过真浏览器时用它，比 Playwright
+    自带的 chromium 更容易过 Cloudflare。
+    """
+    options: dict[str, Any] = {"headless": headless, "args": launch_args()}
+    edge = system_edge()
+    if edge:
+        options["executable_path"] = edge
+    elif channel:
+        options["channel"] = channel
+    if proxy:
+        options["proxy"] = {"server": proxy}
+    return options
+
+
 @dataclass
 class SearchHit:
     title: str
@@ -87,9 +101,13 @@ class PageData:
 class BrowserWiki:
     """A wiki session kept alive by a headless Chromium."""
 
-    def __init__(self, *, headless: bool = True, timeout: float = 30.0) -> None:
+    def __init__(self, *, headless: bool = True, timeout: float = 30.0,
+                 proxy: str = "", channel: str = "") -> None:
         self.headless = headless
         self.timeout = timeout
+        self.proxy = proxy
+        self.channel = channel
+        self.user_agent = ""
         self._pw = None
         self._browser = None
         self._context = None
@@ -97,26 +115,48 @@ class BrowserWiki:
         self._lock = asyncio.Lock()
         self._ready = False
         self.content_ok = False       # 会话首页是否真的拿到了正文
+        self.challenged = False       # 是不是被 Cloudflare 拦在挑战页上了
 
     # -- lifecycle ---------------------------------------------------------
     async def start(self) -> None:
         from playwright.async_api import async_playwright
 
         self._pw = await async_playwright().start()
+        self._browser = await self._pw.chromium.launch(
+            **launch_options(self.headless, self.proxy, self.channel)
+        )
+        self.user_agent = await self._clean_ua() or ""
         kwargs: dict[str, Any] = {
-            "headless": self.headless,
-            "args": launch_args(),
+            "locale": "zh-CN",
+            "viewport": {"width": 1400, "height": 900},
         }
-        edge = system_edge()
-        if edge:
-            kwargs["executable_path"] = edge
-        self._browser = await self._pw.chromium.launch(**kwargs)
+        if self.user_agent:
+            kwargs["user_agent"] = self.user_agent
         self._context = await self._browser.new_context(
-            locale="zh-CN",
-            user_agent=UA,
-            viewport={"width": 1400, "height": 900},
+            **kwargs
         )
         self._page = await self._context.new_page()
+
+    async def _clean_ua(self) -> str | None:
+        """浏览器自报的 UA，去掉里面的 ``Headless`` 字样。
+
+        实测（同一台机器、同一个 IP）：用 Playwright 的默认 UA 会被 Cloudflare 挑战，
+        去掉 ``HeadlessChrome`` 里的 ``Headless`` 就正常放行——版本号保持浏览器真实
+        自报的，不去冒充别的浏览器，免得和 Client Hints 打起来。
+        """
+        try:
+            temp = await self._browser.new_context()
+            try:
+                page = await temp.new_page()
+                ua = await page.evaluate("() => navigator.userAgent")
+            finally:
+                await temp.close()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("isaac_wiki: 取 UA 失败（%s），沿用浏览器默认", exc)
+            return None
+        if not isinstance(ua, str) or not ua:
+            return None
+        return ua.replace("Headless", "")
 
     async def close(self) -> None:
         for obj in (self._browser, self._pw):
@@ -145,15 +185,56 @@ class BrowserWiki:
             await self._page.goto(HOME, wait_until="commit", timeout=15000)
         except Exception:  # noqa: BLE001
             pass
-        try:
-            await self._page.wait_for_selector(".mw-parser-output", timeout=25000)
-            self.content_ok = True
-        except Exception:  # noqa: BLE001
-            # 没等到正文：多半是被 Cloudflare 挑战了（机房 IP 常见），
-            # 记下来，后面 API 报错时能对上号
-            self.content_ok = False
-            log.warning("isaac_wiki: 首页没等到正文选择器，可能被 Cloudflare 挑战")
+        state = await self._wait_content()
+        self.content_ok = state == "content"
+        self.challenged = state == "challenge"
+        if not self.content_ok:
+            log.warning(
+                "isaac_wiki: 会话首页没拿到正文（%s）",
+                "停在被 Cloudflare 挑战的页面上" if self.challenged else "页面空白",
+            )
+            if self.challenged and not self.proxy:
+                log.warning("isaac_wiki: 可配 ISAAC_WIKI_PROXY 让浏览器走代理")
         self._ready = True
+
+    async def _page_state(self) -> str:
+        """'content' | 'challenge' | 'blank'。"""
+        try:
+            return await self._page.evaluate(
+                """() => {
+                     const body = document.body ? document.body.innerText.slice(0, 400) : '';
+                     const text = (document.title || '') + ' ' + body;
+                     const marks = ['请稍候', 'Just a moment', 'Checking your browser',
+                                    'Attention Required', 'cf_chl_opt'];
+                     if (marks.some((m) => text.includes(m))
+                         || document.querySelector(
+                              '#challenge-running, .cf-browser-verification, #cf-chl-wrap')) {
+                       return 'challenge';
+                     }
+                     const r = document.querySelector('.mw-parser-output');
+                     return (r && r.innerHTML.length > 2000) ? 'content' : 'blank';
+                   }"""
+            )
+        except Exception:  # noqa: BLE001
+            return "blank"
+
+    async def _wait_content(self, *, timeout: float = 25.0,
+                            challenge_extra: float = 35.0) -> str:
+        """等正文。撞上 Cloudflare 挑战页就多给点时间——它通常几秒后自己放行。"""
+        start = time.monotonic()
+        deadline = start + timeout
+        extended = False
+        state = "blank"
+        while time.monotonic() < deadline:
+            state = await self._page_state()
+            if state == "content":
+                return state
+            if state == "challenge" and not extended:
+                deadline = start + timeout + challenge_extra
+                extended = True
+                log.warning("isaac_wiki: 遇到 Cloudflare 挑战页，多等 %.0f 秒", challenge_extra)
+            await asyncio.sleep(2.0)
+        return state
 
     async def refresh_session(self) -> None:
         self._ready = False
@@ -204,6 +285,11 @@ class BrowserWiki:
             log.warning("isaac_wiki: api 仍被 403，改用顶层导航")
             status, body = await self._navigate_api(url)
         if status != 200:
+            if status == 403 and self.challenged:
+                raise RuntimeError(
+                    "Cloudflare 挑战未通过（服务器出网 IP 被判成机器人）；"
+                    "给插件配 ISAAC_WIKI_PROXY 走代理即可"
+                )
             raise RuntimeError(f"wiki api status {status}: {body[:160]!r}")
         try:
             return json.loads(body)

@@ -18,6 +18,7 @@ log = logging.getLogger("isaac_wiki")
 POLICY_VERSION = "p3"      # 策略/缓存格式/卡片外观改了要 +1，缓存自动失效
 
 _wiki: BrowserWiki | None = None
+_wiki_key: tuple[str, str] = ("", "")     # (proxy, channel)，变了就得重开浏览器
 _lock = asyncio.Lock()
 _waiting = 0
 _consecutive_failures = 0
@@ -26,10 +27,16 @@ _watchdog: asyncio.Task | None = None
 _WATCHDOG_MAX_INTERVAL = 120.0
 
 
-async def _get_wiki(headless: bool, timeout: float) -> BrowserWiki:
-    global _wiki
+async def _get_wiki(headless: bool, timeout: float, proxy: str = "",
+                    channel: str = "") -> BrowserWiki:
+    global _wiki, _wiki_key
+    key = (proxy, channel)
+    if _wiki is not None and key != _wiki_key:
+        await close_wiki()          # 代理/内核配置变了，浏览器得重开
     if _wiki is None:
-        _wiki = BrowserWiki(headless=headless, timeout=timeout)
+        _wiki = BrowserWiki(headless=headless, timeout=timeout,
+                            proxy=proxy, channel=channel)
+        _wiki_key = key
         await _wiki.start()
     return _wiki
 
@@ -168,6 +175,8 @@ async def render_entry(
     cache_mb: int = 500,
     cache_ttl_days: int = 7,
     idle_close_minutes: int = 10,
+    proxy: str = "",
+    channel: str = "",
     use_cache: bool = True,
 ) -> CardResult:
     """渲染一张卡片（带缓存、串行、失败重试一次）。"""
@@ -182,7 +191,7 @@ async def render_entry(
             key = None
             if use_cache:
                 try:
-                    revid = await _page_revid(title, headless, timeout)
+                    revid = await _page_revid(title, headless, timeout, proxy, channel)
                     key = store.cache_key(title, revid, POLICY_VERSION, width)
                     hit = store.get_cached(key, ttl_days=cache_ttl_days)
                     if hit is not None:
@@ -195,7 +204,7 @@ async def render_entry(
             out = store.cache_dir() / f"_tmp_{int(time.time() * 1000)}.png"
             last_err: Exception | None = None
             for attempt in (1, 2):
-                wiki = await _get_wiki(headless, timeout)
+                wiki = await _get_wiki(headless, timeout, proxy, channel)
                 try:
                     res = await card.render_card(
                         wiki, title, out, page_title=title, width=width,
@@ -221,8 +230,9 @@ async def render_entry(
         _waiting -= 1
 
 
-async def _page_revid(title: str, headless: bool, timeout: float) -> int:
-    wiki = await _get_wiki(headless, timeout)
+async def _page_revid(title: str, headless: bool, timeout: float,
+                      proxy: str = "", channel: str = "") -> int:
+    wiki = await _get_wiki(headless, timeout, proxy, channel)
     data = await wiki.api({
         "action": "query", "titles": title, "prop": "revisions", "rvprop": "ids",
         "redirects": "1",

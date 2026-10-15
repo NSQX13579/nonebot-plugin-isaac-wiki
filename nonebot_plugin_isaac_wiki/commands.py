@@ -79,6 +79,9 @@ def _env_hint(exc: Exception) -> str:
         return "浏览器或系统库没装好：playwright install chromium（必要时 playwright install-deps）"
     if "no-sandbox" in text or "running as root" in text:
         return "Chromium 在 root 下要关 sandbox：插件已自动加 --no-sandbox，仍报错就查系统库"
+    if "cloudflare" in text or "挑战未通过" in text:
+        return ("wiki 的 Cloudflare 挑战没过（服务器出网 IP 被当成机器人）："
+                "给插件配 ISAAC_WIKI_PROXY，例如 http://127.0.0.1:7890")
     return ""
 
 
@@ -201,6 +204,8 @@ async def _render_with_feedback(bot: Bot, event: GroupMessageEvent, term: str,
             cache_mb=cfg.isaac_wiki_cache_mb,
             cache_ttl_days=cfg.isaac_wiki_cache_ttl_days,
             idle_close_minutes=cfg.isaac_wiki_idle_close_minutes,
+            proxy=cfg.isaac_wiki_proxy,
+            channel=cfg.isaac_wiki_channel,
             use_cache=keep_idx is None,
         )
     except engine.QueueFull:
@@ -251,7 +256,10 @@ async def _withdraw(bot: Bot, message_id) -> None:
 
 async def _ensure_wiki_for_meta(cfg: Config):
     """只在需要 API 时确保浏览器就绪（渲染本身也会用到同一个实例）。"""
-    return await engine._get_wiki(cfg.isaac_wiki_headless, cfg.isaac_wiki_timeout)
+    return await engine._get_wiki(
+        cfg.isaac_wiki_headless, cfg.isaac_wiki_timeout,
+        cfg.isaac_wiki_proxy, cfg.isaac_wiki_channel,
+    )
 
 
 @menu_reply.handle()
