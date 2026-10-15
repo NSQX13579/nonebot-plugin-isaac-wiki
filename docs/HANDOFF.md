@@ -81,6 +81,12 @@
    机房 IP 仍可能被拦，三个旋钮按顺序试：`ISAAC_WIKI_CHANNEL=chrome`（装真 Chrome）、
    `ISAAC_WIKI_HEADLESS=false` + `xvfb-run`（有头）、`ISAAC_WIKI_PROXY`（住宅代理）。
    判断是不是挑战页：看 `wiki.challenged`（selfcheck 第 2 步会打印）与标题是否「请稍候…」。
+   另外两招已经默认打开/内置：
+   - **抹无头特征**（`source.STEALTH_JS`，add_init_script 注入）：无头 Linux 的 WebGL 会报
+     SwiftShader、插件列表为空，这些比 UA 更容易被判机器人。注意它是**语句脚本**，
+     不能写成 `() => {}`（那样 add_init_script 只是求值一个函数表达式，等于没跑）。
+   - **patchright**：装了（`pip install patchright && patchright install chromium`）就自动
+     换用它当驱动，CDP 痕迹更少；`playwright_api()` 负责挑。selfcheck 会打印实际驱动。
 2. 页面正文是 JS 渲染的，会**间歇返回空壳**（6KB、0 个分节）→ 要检测并重载。
    注意「空壳」的判据**不能拿 URL 比**：wiki 会把别名重定向（`硫磺火` → `C118`），
    比请求时的 URL 会永远等不到「落地」、白等 60 秒后误报「页面未能渲染」。

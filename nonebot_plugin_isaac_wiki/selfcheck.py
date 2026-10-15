@@ -110,6 +110,15 @@ async def check_steps() -> None:
         print(f"     url={url}\n     标题={title}  正文字数={length}"
               f"  拿到正文={wiki.content_ok}  撞上挑战页={wiki.challenged}", flush=True)
         print(f"     UA: {wiki.user_agent}", flush=True)
+        print(f"     驱动: {wiki.driver}", flush=True)
+        gpu = await wiki.page.evaluate(
+            """() => { const c = document.createElement('canvas');
+                 const gl = c.getContext('webgl');
+                 if (!gl) return '（没有 WebGL）';
+                 const dbg = gl.getExtension('WEBGL_debug_renderer_info');
+                 return dbg ? String(gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL)) : '（拿不到 renderer）'; }"""
+        )
+        print(f"     WebGL renderer: {gpu}", flush=True)
         ok()
     except Exception as exc:  # noqa: BLE001
         bad(exc)

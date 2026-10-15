@@ -79,6 +79,70 @@ def launch_options(headless: bool, proxy: str = "", channel: str = "") -> dict[s
     return options
 
 
+def playwright_api():
+    """挑一个浏览器驱动：装了 patchright 就优先用它。
+
+    patchright 是 playwright 的补丁版，专门抹掉 CDP（自动化）痕迹——无头 Chromium
+    被 Cloudflare 挑战时，它是最省事的一条路（不用代理，装个包就行）。
+    """
+    try:
+        from patchright.async_api import async_playwright  # type: ignore
+
+        return async_playwright, "patchright"
+    except Exception:  # noqa: BLE001
+        from playwright.async_api import async_playwright
+
+        return async_playwright, "playwright"
+
+
+# 无头 Linux 上最扎眼的机器特征：WebGL 报 SwiftShader（软件渲染）、插件列表空、
+# window.chrome 缺字段。抹掉它们比换 IP 便宜得多。放在 init script 里，
+# 每个新文档生效前先跑（add_init_script 收的是脚本文本，不是箭头函数）。
+STEALTH_JS = """
+try {
+  const def = (obj, prop, value) => {
+    try { Object.defineProperty(obj, prop, { get: () => value, configurable: true }); }
+    catch (e) {}
+  };
+
+  // WebGL：把 SwiftShader / Mesa 换成一块真实显卡的名字
+  const GPU = { vendor: 'Intel Inc.', renderer: 'ANGLE (Intel, Intel(R) UHD Graphics 630 (0x00003E9B) Direct3D11 vs_5_0 ps_5_0, D3D11)' };
+  for (const name of ['WebGLRenderingContext', 'WebGL2RenderingContext']) {
+    const proto = window[name] && window[name].prototype;
+    if (!proto) continue;
+    const original = proto.getParameter;
+    proto.getParameter = function (param) {
+      if (param === 37445) return GPU.vendor;      // UNMASKED_VENDOR_WEBGL
+      if (param === 37446) return GPU.renderer;    // UNMASKED_RENDERER_WEBGL
+      return original.apply(this, arguments);
+    };
+  }
+
+  // 插件列表：无头模式是空的
+  const plugins = [
+    { name: 'PDF Viewer', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+    { name: 'Chrome PDF Viewer', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+    { name: 'Chromium PDF Viewer', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+  ];
+  if (navigator.plugins && navigator.plugins.length === 0) {
+    def(navigator, 'plugins', plugins);
+    def(navigator, 'mimeTypes', [{ type: 'application/pdf' }, { type: 'text/pdf' }]);
+  }
+
+  def(navigator, 'languages', ['zh-CN', 'zh', 'en']);
+  if (!navigator.hardwareConcurrency || navigator.hardwareConcurrency < 4) {
+    def(navigator, 'hardwareConcurrency', 8);
+  }
+  if (!navigator.deviceMemory) def(navigator, 'deviceMemory', 8);
+  if (!window.chrome) window.chrome = {};
+  if (!window.chrome.runtime) window.chrome.runtime = {};
+
+  // webdriver 已经被启动参数关掉，这里再兜一层
+  def(navigator, 'webdriver', false);
+} catch (e) { /* 隐身脚本出错也不能影响页面 */ }
+"""
+
+
 @dataclass
 class SearchHit:
     title: str
@@ -108,6 +172,7 @@ class BrowserWiki:
         self.proxy = proxy
         self.channel = channel
         self.user_agent = ""
+        self.driver = ""
         self._pw = None
         self._browser = None
         self._context = None
@@ -119,9 +184,10 @@ class BrowserWiki:
 
     # -- lifecycle ---------------------------------------------------------
     async def start(self) -> None:
-        from playwright.async_api import async_playwright
-
-        self._pw = await async_playwright().start()
+        api, self.driver = playwright_api()
+        if self.driver != "playwright":
+            log.info("isaac_wiki: 使用 %s 驱动浏览器（CDP 痕迹更少）", self.driver)
+        self._pw = await api().start()
         self._browser = await self._pw.chromium.launch(
             **launch_options(self.headless, self.proxy, self.channel)
         )
@@ -135,6 +201,10 @@ class BrowserWiki:
         self._context = await self._browser.new_context(
             **kwargs
         )
+        try:
+            await self._context.add_init_script(STEALTH_JS)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("isaac_wiki: 注入隐身脚本失败（%s），继续跑", exc)
         self._page = await self._context.new_page()
 
     async def _clean_ua(self) -> str | None:

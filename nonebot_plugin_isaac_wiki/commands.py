@@ -80,8 +80,10 @@ def _env_hint(exc: Exception) -> str:
     if "no-sandbox" in text or "running as root" in text:
         return "Chromium 在 root 下要关 sandbox：插件已自动加 --no-sandbox，仍报错就查系统库"
     if "cloudflare" in text or "挑战未通过" in text:
-        return ("wiki 的 Cloudflare 挑战没过（服务器出网 IP 被当成机器人）："
-                "给插件配 ISAAC_WIKI_PROXY，例如 http://127.0.0.1:7890")
+        return ("wiki 的 Cloudflare 没放行（服务器被判成机器人）。按顺序试："
+                "① 本版已自动抹无头特征 ② pip install patchright && patchright install chromium"
+                "（装了会自动启用）③ ISAAC_WIKI_HEADLESS=false 配 xvfb-run 有头跑 "
+                "④ ISAAC_WIKI_PROXY=http://127.0.0.1:7890 走代理")
     return ""
 
 

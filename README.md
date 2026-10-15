@@ -55,9 +55,11 @@
   （`__cf_bm` 绑 TLS 指纹）。所以查询和截图都在同一个常驻 Chromium 里做。
 - 正文是 JS 渲染的，偶尔返回空壳，插件会检测并重载；信息框贴图只在滚进视口时才绘制。
 - 于是进程会常驻一个浏览器（10 分钟不用自动关，bot 退出时会回收）。改了配置要重启 bot。
-- wiki 的 Cloudflare 会按环境和 IP 判机器人（页面停在「请稍候…」、接口 403）。插件已经
-  把 UA 里 `HeadlessChrome` 的字样清掉（实测这一条就会决定放行还是被挑战）；机房 IP 仍可能
-  被拦，这时依次试 `ISAAC_WIKI_CHANNEL=chrome`（装真 Chrome）、`ISAAC_WIKI_HEADLESS=false`
-  + `xvfb-run`（有头模式）、`ISAAC_WIKI_PROXY`（住宅代理）。用 selfcheck 一眼看是哪种情况。
+- wiki 的 Cloudflare 会按环境判机器人（页面停在「请稍候…」、接口 403）。插件已做三件事：
+  清掉 UA 里的 `HeadlessChrome`、抹掉无头环境的机器特征（WebGL/插件/chrome 对象）、
+  装上 patchright 时自动换用它。仍被拦时依次试：`pip install patchright &&
+  patchright install chromium`（装了自动启用）→ `ISAAC_WIKI_HEADLESS=false` 配 `xvfb-run`
+  （有头模式）→ `ISAAC_WIKI_CHANNEL=chrome`（真内核）→ `ISAAC_WIKI_PROXY`（代理）。
+  selfcheck 会打印 UA / WebGL renderer / 驱动 / 是否撞挑战页，一眼看是哪种情况。
 
 设计细节、踩过的坑和本地验证方法见 [`docs/HANDOFF.md`](docs/HANDOFF.md)。

@@ -351,6 +351,18 @@ def test_clean_ua_drops_the_headless_token():
     assert "Chrome/141" in ua
 
 
+def test_stealth_script_is_a_plain_script_and_driver_defaults():
+    """隐身脚本必须能被 add_init_script 直接用；没装 patchright 时用 playwright。"""
+    from nonebot_plugin_isaac_wiki import source
+
+    assert not source.STEALTH_JS.lstrip().startswith("("), "别写成箭头函数，那样不会执行"
+    assert "UNMASKED_RENDERER_WEBGL" in source.STEALTH_JS
+    assert "37446" in source.STEALTH_JS
+
+    _, driver = source.playwright_api()
+    assert driver in ("patchright", "playwright")
+
+
 # --- 缓存清理 ---------------------------------------------------------------
 
 def test_prune_removes_meta_together_with_card(isolated):
