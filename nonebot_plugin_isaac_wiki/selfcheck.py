@@ -37,6 +37,8 @@ else:
 TITLE = "硫磺火"
 PROXY = os.environ.get("ISAAC_WIKI_PROXY", "").strip()
 CHANNEL = os.environ.get("ISAAC_WIKI_CHANNEL", "").strip()
+HEADLESS = os.environ.get("ISAAC_WIKI_HEADLESS", "true").strip().lower() \
+    not in ("false", "0", "no")
 failures = 0
 
 
@@ -73,6 +75,8 @@ async def check_browser() -> None:
     print(f"     启动参数: {' '.join(source.launch_args())}", flush=True)
     print(f"     代理: {PROXY or '（未设置，直连）'}", flush=True)
     print(f"     内核: {CHANNEL or '（Playwright 自带 chromium）'}", flush=True)
+    print(f"     模式: {'无头' if HEADLESS else '有头（需要 X 显示，服务器上配 xvfb-run）'}",
+          flush=True)
     edge = source.system_edge()
     if edge:
         # Windows 本地开发会复用系统 Edge，Playwright 自带的 chromium 没装也没关系
@@ -97,7 +101,7 @@ async def check_browser() -> None:
 
 
 async def check_steps() -> None:
-    wiki = source.BrowserWiki(headless=True, proxy=PROXY, channel=CHANNEL)
+    wiki = source.BrowserWiki(headless=HEADLESS, proxy=PROXY, channel=CHANNEL)
     try:
         step("2/5 启动浏览器 + 打开 wiki")
         await wiki.start()
