@@ -180,13 +180,17 @@ def plan_card(
     used = 0
     trim: int | None = None
     for pos, i in enumerate(visible_tops()):
-        protected = subtree_protected(i) or i == keep_variant
+        # 头目页的第一个内容节点一律保留：它的高度可能因为标题嵌套被误测
+        # （妈腿页的首节就是这种情况），裁剪或移出都会误伤正文
+        protected = (subtree_protected(i) or i == keep_variant
+                     or (is_boss and pos == 0))
         if protected:
             used += h[i]
             continue
         if used + h[i] <= BUDGET:
             used += h[i]
         elif pos == 0 and trim is None:
+            # 非头目页：「首个内容节点就是巨型节」时只留开头（如 K44 的「效果」）
             trim = i
             menu_idx.append(i)
             used += BUDGET

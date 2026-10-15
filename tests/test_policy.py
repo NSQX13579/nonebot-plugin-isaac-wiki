@@ -92,3 +92,12 @@ def test_giant_first_section_is_trimmed():
     plan = plan_card(sections, base=800, page_title="K44")
     assert plan.trim == 0
     assert "效果" in plan.menu
+
+
+def test_boss_pages_never_trim():
+    """头目页的首个内容节点既不裁剪也不移出（妈腿页首节会被误测成巨型节）。"""
+    sections = [sec(0, "妈妈", 2, 4252), sec(1, "行动方式", 2, 1097)]
+    plan = plan_card(sections, base=169, page_title="实体/45", is_boss=True)
+    assert plan.trim is None
+    assert 0 not in plan.hide
+    assert "妈妈" not in plan.menu
