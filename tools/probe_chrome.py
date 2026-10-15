@@ -70,8 +70,24 @@ PROBE_JS = """
                  ...box(el), text: (el.innerText || '').trim().slice(0, 24),
                  html: el.outerHTML.slice(0, 160)});
   }
+  // 全站通知 / 弹层：固定定位的浮层，以及正文里带「我知道了」这类字样的元素
+  const notices = [];
+  for (const el of Array.from(document.querySelectorAll('body *'))) {
+    const cs = getComputedStyle(el);
+    const t = (el.innerText || '').trim();
+    const fixed = cs.position === 'fixed';
+    const looksNotice = /全站通知|我知道了|详情请点击|本站讯/.test(t) && t.length < 800;
+    if (!fixed && !looksNotice) continue;
+    const r = el.getBoundingClientRect();
+    if (r.width < 20 || r.height < 10) continue;
+    notices.push({tag: el.tagName, cls: String(el.className || '').slice(0, 90),
+                  id: el.id || '', pos: cs.position, z: cs.zIndex,
+                  rect: [Math.round(r.left), Math.round(r.top),
+                         Math.round(r.width), Math.round(r.height)],
+                  text: t.slice(0, 36), html: el.outerHTML.slice(0, 220)});
+  }
   return {cardW: Math.round(rr.width), cardH: Math.round(rr.height),
-          floating, badges};
+          floating, badges, notices};
 }
 """
 
@@ -82,7 +98,8 @@ async def probe(wiki, title: str) -> None:
         print("  页面没能渲染")
         return
     page = wiki.page
-    await page.wait_for_timeout(1200)
+    # 弹层常常晚于页面渲染才挂载，多等一会儿再看
+    await page.wait_for_timeout(3500)
     await page.add_style_tag(content=card.CARD_CSS)
     await page.add_style_tag(content=card.HIDE_CLASS_CSS)
     data = await page.evaluate(PROBE_JS)
@@ -102,6 +119,11 @@ async def probe(wiki, title: str) -> None:
     for item in data["badges"]:
         print(f"    {item['tag']} .{item['cls']} {item['pos']}/{item['float']} "
               f"top={item['top']} left={item['left']} text={item['text']!r}")
+        print(f"      {item['html']}")
+    print(f"  固定定位/通知类元素（{len(data['notices'])} 个）：")
+    for item in data["notices"]:
+        print(f"    {item['tag']}#{item['id']} .{item['cls']} {item['pos']} z={item['z']} "
+              f"rect={item['rect']} text={item['text']!r}")
         print(f"      {item['html']}")
 
 

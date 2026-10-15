@@ -31,7 +31,8 @@
 
 - **缓存命中不再丢菜单**：原来只存 PNG，第二次查同一条目「有图没菜单」。现在 `store`
   把 `Plan` + 分节写成同名 `.json` 一起缓存，`engine._cached_result` 读回来；淘汰/清理时
-  PNG 与元数据成对删除，并扫掉孤儿元数据。缓存版本 `POLICY_VERSION` 升到 `p2`。
+  PNG 与元数据成对删除，并扫掉孤儿元数据。缓存版本 `POLICY_VERSION`（现在 `p3`，
+  卡片外观改了也要 +1）。
 - **空闲回收**：`ISAAC_WIKI_IDLE_CLOSE_MINUTES` 原先只声明没实现。现在
   `engine.start_watchdog` 起一个全局唯一的空闲看门狗（只在真要渲染时才起），超时就关浏览器；
   `register()` 里注册 `driver.on_shutdown(engine.shutdown)`，bot 退出时停看门狗 + 关浏览器，
@@ -40,9 +41,18 @@
   旧菜单 / 直发数字都不再出图。
 - **失败降级**：浏览器或 playwright 起不来时，异常原本直接冒进 NoneBot 日志、用户什么都收不到；
   现在会回「服务器上还没装好 playwright / chromium」+ 条目链接（`commands._unavailable_text`）。
-- **右上角 DLC 徽章**：3119d99 的规则只认「短文本」，漏掉了 `innerText` 为空的纯图标
-  （DLC 标记是绝对定位的小图标）。`CHROME_JS` 补了 `cornerIcon` 一类，C118 实图已确认清干净、
-  翻页箭头和贴图没被误伤。
+- **右上角 DLC 徽章**：那是 wiki 的「资料片归属」图标（`DLC-.png`，tooltip
+  「重生，或在胎衣版本被移除的特性」），绝对定位压在道具图右上角，压成卡片后会浮在标题栏上。
+  3119d99 的规则只认「短文本」，漏掉了这种 `innerText` 为空的纯图标。现在 `TITLEBAR_JS`
+  把它**挪进标题栏右上角**（信息保留、不再浮空）；万一没认出来，`CHROME_JS` 的
+  `cornerIcon` 分支还会兜底把它隐藏。同页的「道具」圆角标签是跳分类页的导航，继续隐藏。
+- **站点通知盖住卡片**：wiki 的 Naive UI 通知弹层（`.n-notification`，固定定位）**晚于**
+  清理脚本才挂载（实测：上一轮出图干净纯属运气，下一轮它直接盖住卡片右半边）。现在三层防御：
+  `CARD_CSS` 按类名挡（晚挂载照样挡）、`CHROME_JS` 加「固定定位一律隐藏」、截图前再跑一遍清理。
+  顺手把「按文案兜一层」限制在正文之外——正文里出现「本站讯」是正常内容，不能连坐。
+- **自己踩的坑**：`cornerIcon` 规则会把我们**自己插进标题栏的 DLC 图标槽位**也当徽章隐藏
+  （槽位同样是「绝对定位 + 无文本 + 贴右上角」）。所有清理循环都加了
+  `el.closest('.isaac-titlebar')` 例外，改这类启发式规则时记得保留。
 
 ### 测试
 
@@ -96,7 +106,7 @@
   若无菜单，但词等于解析到的页面上的某个分节标题 → 也直接开那一节。
 - 慢查询先发「正在查询… + 链接」，出图后撤回；失败必须有明确回复。
 - 限流 3 秒/人；队列上限 3；连续 2 次渲染失败重启浏览器。
-- 缓存 = 键（标题 + `lastrevid` + 策略版本 `p2` + 宽度）+ PNG + 同名 `.json` 元数据；
+- 缓存 = 键（标题 + `lastrevid` + 策略版本 `p3` + 宽度）+ PNG + 同名 `.json` 元数据；
   500MB LRU + 7 天 TTL，淘汰时成对删除。
 - 浏览器空闲 10 分钟自动关（`ISAAC_WIKI_IDLE_CLOSE_MINUTES`，0 = 不关），bot 退出时也会回收。
 - 群开关关掉后，「以撒 <词>」和数字回选都不再出图。
@@ -136,6 +146,7 @@ $env:PYTHONUTF8 = '1'
 - 出卡片：`& $py -X utf8 tools\preview.py 硫磺火 妈心 箱子 妈腿`
 - 走生产路径（engine.render_entry：缓存 + 元数据 + 菜单）：
   `& $py -X utf8 tools\preview.py --via-engine 硫磺火`
+  （会顺手抽查「标题栏里 DLC 图标已加载、页面上没有残留的固定浮层」）
 - 只看某一节：`& $py -X utf8 tools\preview.py 妈心 --section 它还活着`
 - 看清卡片顶部还浮着什么（chrome 规则是启发式的，wiki 改版后用它校准）：
   `& $py -X utf8 tools\probe_chrome.py C118`

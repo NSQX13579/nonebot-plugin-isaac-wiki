@@ -134,6 +134,24 @@ async def show_via_engine(wiki, term: str, width: int,
           f"  隐藏={first.plan.hide}")
     print(f"  菜单（{len(first.plan.menu)} 项）：{' / '.join(first.plan.menu) or '无'}")
 
+    # 卡片里的「该有的有、不该有的没有」抽查：DLC 图标进标题栏了吗？固定浮层清干净了吗？
+    sanity = await wiki.page.evaluate(
+        "() => { const bar = document.querySelector('.isaac-titlebar');"
+        " const img = bar ? bar.querySelector('img[alt*=\"DLC\"]') : null;"
+        " const r = img ? img.getBoundingClientRect() : null;"
+        " return {titlebar: !!bar,"
+        "  dlcInTitle: bar ? bar.querySelectorAll('img[alt*=\"DLC\"]').length : 0,"
+        "  dlcLoaded: img ? img.complete && img.naturalWidth > 0 : null,"
+        "  dlcRect: r ? [Math.round(r.x), Math.round(r.y),"
+        "                Math.round(r.width), Math.round(r.height)] : null,"
+        "  visibleFixed: Array.from(document.querySelectorAll('body *')).filter((el) =>"
+        "    getComputedStyle(el).position === 'fixed'"
+        "    && el.getClientRects().length > 0).length}; }"
+    )
+    print(f"  抽查：标题栏={sanity['titlebar']}  标题栏内 DLC 图标={sanity['dlcInTitle']}"
+          f"（已加载={sanity['dlcLoaded']} 位置={sanity['dlcRect']}）"
+          f"  仍可见的固定浮层={sanity['visibleFixed']}")
+
     if keep_idx is None:          # 带 keep_idx 的卡片不走缓存，不必再跑一次
         second = await engine.render_entry(canonical, **common)
         same_menu = second.plan.menu == first.plan.menu

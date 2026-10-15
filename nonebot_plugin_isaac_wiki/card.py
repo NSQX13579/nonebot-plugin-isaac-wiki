@@ -45,6 +45,14 @@ body { margin: 0 !important; padding: 0 !important; }
   display: none !important;
 }
 
+/* 站点浮层（Naive UI 的通知 / 皮肤坞等）：它们常常晚于清理脚本才挂载，
+   必须在 CSS 这一层就挡掉，不能只靠截图前的 DOM 清理 */
+.n-notification, .n-notification-container, .n-message-container,
+.n-dialog-container, .n-modal-container, .n-drawer-container,
+.n-image-preview-container, .skin-dock, .huiji-toast {
+  display: none !important;
+}
+
 /* 单列 */
 #content, #content-container, .mw-body, #wiki-outer-body, #wrapper, .row,
 #mw-content-text, .mw-body-content {
@@ -109,13 +117,44 @@ TITLEBAR_JS = """
     }
   }
   const root = document.querySelector('#mw-content-text');
+
+  // 资料片归属图标（DLC）：wiki 用绝对定位把它压在道具图右上角，压成单列卡片后
+  // 它会浮在标题栏上。这里把它挪进标题栏右侧——信息保留，但不再浮空。
+  const dlcIcons = [];
+  for (const el of Array.from(root.querySelectorAll('div,span'))) {
+    const cs = getComputedStyle(el);
+    if (cs.position !== 'absolute' && cs.position !== 'fixed') continue;
+    const img = el.querySelector('img');
+    if (!img) continue;
+    const name = (img.getAttribute('alt') || '') + ' ' + (img.getAttribute('src') || '');
+    if (!/DLC/i.test(name)) continue;
+    dlcIcons.push(el);
+  }
+
   const bar = document.createElement('div');
   bar.className = 'isaac-titlebar';
-  bar.style.cssText = 'background:#153970;color:#fff;text-align:center;'
+  bar.style.cssText = 'position:relative;background:#153970;color:#fff;text-align:center;'
     + 'padding:12px 16px;margin:0 0 10px 0;border-radius:10px;';
   bar.innerHTML = '<div style="font-size:22px;font-weight:bold;letter-spacing:2px">'
     + title + '</div>'
     + (en ? '<div style="font-size:14px;opacity:.75;margin-top:2px">' + en + '</div>' : '');
+  if (dlcIcons.length) {
+    const slot = document.createElement('div');
+    slot.style.cssText = 'position:absolute;top:9px;right:12px;display:flex;'
+      + 'gap:5px;align-items:center;';
+    for (const el of dlcIcons) {
+      el.style.cssText = 'position:static;top:auto;right:auto;left:auto;text-align:center;';
+      const hint = el.querySelector('[title]');
+      if (hint) el.title = hint.getAttribute('title') || '';
+      const wrap = document.createElement('span');
+      // 原图只有 31x14，缩到 1.4 倍在手机上才看得清；从右上角缩放，贴边不溢出
+      wrap.style.cssText = 'display:inline-block;line-height:0;'
+        + 'transform:scale(1.4);transform-origin:top right;';
+      wrap.appendChild(el);
+      slot.appendChild(wrap);
+    }
+    bar.appendChild(slot);
+  }
   root.insertBefore(bar, root.firstChild);
   return title;
 }
@@ -280,6 +319,9 @@ CHROME_JS = """
   // 分两种：带短文本的（道具 / 卡牌 / 饰品…），和纯图标（DLC 标记 innerText 为空）。
   const rr = root.getBoundingClientRect();
   for (const el of Array.from(root.querySelectorAll('*'))) {
+    // 别碰我们自己插进标题栏的东西（DLC 图标槽位也是「绝对定位 + 无文本 + 贴右上角」，
+    // 正好撞上下面这条启发式规则）
+    if (el.closest('.isaac-titlebar')) continue;
     const cs = getComputedStyle(el);
     if (cs.position !== 'absolute' && cs.position !== 'fixed') continue;
     const r = el.getBoundingClientRect();
@@ -295,8 +337,18 @@ CHROME_JS = """
       el.classList.add('isaac-hide'); n++;
     }
   }
-  // 全站通知 / 弹层：按「我知道了」这类关闭按钮识别
+  // 固定定位的浮层（站点通知、皮肤坞…）：正文里没有正当用途，一律隐藏
+  for (const el of Array.from(document.querySelectorAll('body *'))) {
+    if (el.closest('.isaac-titlebar')) continue;
+    if (getComputedStyle(el).position !== 'fixed') continue;
+    const r = el.getBoundingClientRect();
+    if (r.width < 8 || r.height < 8) continue;
+    el.classList.add('isaac-hide'); n++;
+  }
+  // 再按文案兜一层「我知道了」这类弹层。只看正文之外的元素：
+  // 正文里出现「本站讯」是正常内容，不能连坐。
   for (const el of Array.from(document.querySelectorAll('div, section, aside'))) {
+    if (root.contains(el) || el.contains(root)) continue;
     const t = el.innerText || '';
     if (t.length > 600) continue;
     if (/全站通知|我知道了|本站讯/.test(t)) { el.classList.add('isaac-hide'); n++; }
@@ -487,6 +539,8 @@ async def render_card(
 
     await page.evaluate(SCROLL_ALL_JS)
     await page.wait_for_timeout(400)
+    # 站点浮层（通知弹层之类）可能晚于第一次清理才挂载，截图前再扫一遍
+    chrome += await page.evaluate(CHROME_JS)
 
     out = Path(out_path)
     out.parent.mkdir(parents=True, exist_ok=True)

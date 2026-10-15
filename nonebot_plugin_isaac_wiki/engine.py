@@ -15,7 +15,7 @@ from .source import BrowserWiki
 
 log = logging.getLogger("isaac_wiki")
 
-POLICY_VERSION = "p2"      # 策略/缓存格式改了要 +1，缓存自动失效
+POLICY_VERSION = "p3"      # 策略/缓存格式/卡片外观改了要 +1，缓存自动失效
 
 _wiki: BrowserWiki | None = None
 _lock = asyncio.Lock()
