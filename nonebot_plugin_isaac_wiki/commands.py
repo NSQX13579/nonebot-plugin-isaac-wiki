@@ -12,7 +12,7 @@ import re
 import time
 from pathlib import Path
 
-from nonebot import on_command, on_message
+from nonebot import get_driver, get_plugin_config, on_command, on_message
 from nonebot.adapters import Message
 from nonebot.adapters.onebot.v11 import (
     Bot,
@@ -39,9 +39,14 @@ _last_call: dict[tuple[int, int], float] = {}
 
 
 def _cfg() -> Config:
-    from nonebot import get_driver
+    """读插件配置。
 
-    return Config.parse_obj(get_driver().config)
+    必须走 ``get_plugin_config``：它会把全局配置 dump 成 dict 再交给插件 Config
+    重新校验（并读 .env 里 ISAAC_WIKI_* 的覆盖值）。直接 ``Config.parse_obj(
+    get_driver().config)`` 在 pydantic v2 下会抛 ValidationError——全局配置是模型
+    实例，不是 dict。
+    """
+    return get_plugin_config(Config)
 
 
 def _link(canonical: str) -> str:
@@ -63,6 +68,25 @@ def _quoted_id(event: GroupMessageEvent) -> int | None:
 
 def _plain(event: GroupMessageEvent) -> str:
     return event.get_message().extract_plain_text().strip()
+
+
+def _browser_missing(exc: Exception) -> bool:
+    """是不是「浏览器/playwright 没装好」这一类错误。"""
+    text = f"{type(exc).__name__}: {exc}"
+    return (
+        isinstance(exc, ImportError)
+        or "playwright" in text.lower()
+        or "Executable doesn't exist" in text
+    )
+
+
+def _unavailable_text(term: str, exc: Exception) -> str:
+    if _browser_missing(exc):
+        return (
+            "以撒 wiki 靠浏览器抓页面，服务器上还没装好 playwright / chromium。\n"
+            f"先直接看 wiki 吧：{_link(term)}"
+        )
+    return f"wiki 暂时连不上（{type(exc).__name__}），稍后再试。\n{_link(term)}"
 
 
 def _is_menu_reply(event: GroupMessageEvent) -> bool:
@@ -101,10 +125,21 @@ async def _render_with_feedback(bot: Bot, event: GroupMessageEvent, term: str,
     title = canonical or term
     page = None
     if canonical is None:
-        wiki = await _ensure_wiki_for_meta(cfg)
-        canonical, chain = await wiki.resolve(term)
+        # 浏览器起不来（没装 playwright/chromium）也要有明确回复，
+        # 不能让异常冒到 NoneBot 日志里、用户什么都收不到
+        try:
+            wiki = await _ensure_wiki_for_meta(cfg)
+            canonical, chain = await wiki.resolve(term)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("isaac_wiki: 浏览器/接口不可用 %s", exc)
+            await bot.send(event, _unavailable_text(term, exc))
+            return
         if not canonical:
-            hits = await wiki.search(term, limit=5)
+            try:
+                hits = await wiki.search(term, limit=5)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("isaac_wiki: 搜索失败 %s", exc)
+                hits = []
             if not hits:
                 await bot.send(event, f"没找到「{term}」。试试直接发条目名，或看 wiki 搜索：{_link(term)}")
                 return
@@ -138,6 +173,7 @@ async def _render_with_feedback(bot: Bot, event: GroupMessageEvent, term: str,
             queue_limit=cfg.isaac_wiki_queue_limit,
             cache_mb=cfg.isaac_wiki_cache_mb,
             cache_ttl_days=cfg.isaac_wiki_cache_ttl_days,
+            idle_close_minutes=cfg.isaac_wiki_idle_close_minutes,
             use_cache=keep_idx is None,
         )
     except engine.QueueFull:
@@ -194,6 +230,9 @@ async def _ensure_wiki_for_meta(cfg: Config):
 @menu_reply.handle()
 async def _handle_number(bot: Bot, event: GroupMessageEvent) -> None:
     cfg = _cfg()
+    # 群开关关掉之后，引用旧菜单 / 直发数字也不该再出图
+    if not store.is_group_enabled(event.group_id):
+        return
     text = _plain(event)
     quoted = _quoted_id(event)
     menu = None
@@ -259,11 +298,13 @@ switch = on_command("以撒开关", priority=12, permission=SUPERUSER)
 
 @admin.handle()
 async def _handle_admin(bot: Bot, event: GroupMessageEvent) -> None:
+    cfg = _cfg()
     stats = store.cache_stats()
     await admin.finish(
         "以撒 wiki 状态：\n"
         f"渲染队列：{engine.busy_count()} 个等待\n"
-        f"浏览器空闲：{int(engine.idle_seconds())} 秒\n"
+        f"浏览器空闲：{int(engine.idle_seconds())} 秒"
+        f"（{cfg.isaac_wiki_idle_close_minutes} 分钟不用就关）\n"
         f"缓存：{stats['count']} 张 / {stats['bytes'] / 1048576:.1f} MB\n"
         f"本群：{'开启' if store.is_group_enabled(event.group_id) else '关闭'}"
     )
@@ -279,4 +320,8 @@ async def _handle_switch(bot: Bot, event: GroupMessageEvent) -> None:
 
 def register() -> None:
     """保持与其他插件一致的入口（导入本模块即完成注册）。"""
+    try:
+        get_driver().on_shutdown(engine.shutdown)
+    except Exception as exc:  # noqa: BLE001
+        log.debug("isaac_wiki: 注册退出钩子失败 %s", exc)
     log.debug("isaac_wiki: commands registered")

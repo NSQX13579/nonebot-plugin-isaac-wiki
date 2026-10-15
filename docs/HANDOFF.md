@@ -5,8 +5,50 @@
 
 ## 一句话现状
 
-功能已实现并跑通（卡片出图、命令、数字回选、缓存、限流、开关、单测、自检）。
-**剩一个已知 bug**：标题嵌在容器里的页面，分节划分会算错。
+功能已实现，接线级测试补齐（命令 → engine → card 三层都有用例盯签名），生产路径
+（`engine.render_entry`）已用真实浏览器验收过。
+**源码在插件仓库，部署副本在 `goat-repo/src/plugins/nonebot_plugin_isaac_wiki/`**，
+两边要手动保持一致（改完源码记得重新拷贝，SHA256 对一下）。
+还没推远端；分节划分的嵌套标题问题仍靠 policy 兜底（见文末）。
+
+## 本轮修复（2026-10-15 晚，v0.2.0）
+
+上一轮「功能已跑通」其实是假象——**两个线上必挂的接线 bug**（都是 be55e5b 引入，
+3119d99 没碰到）：
+
+1. `commands._cfg()` 写的是 `Config.parse_obj(get_driver().config)`。pydantic v2 下
+   全局配置是模型实例、不是 dict，直接抛 ValidationError。`_cfg()` 是三个处理函数的第一行，
+   于是「以撒 <词>」、数字回选、引用菜单**全部在进逻辑前就炸**，用户侧表现为没反应
+   （只有不读配置的 `以撒状态` / `以撒开关` 还活着）。改用 `nonebot.get_plugin_config(Config)`。
+2. `engine.render_entry` 调 `card.render_card(..., expect_heading=None, ...)`，而
+   `render_card` 压根没有 `expect_heading` 形参 → 每次渲染都 TypeError，走完「重试 → 重启
+   浏览器」后回一句「wiki 暂时连不上」。
+
+为什么没被发现：单测只覆盖 parse/policy 纯逻辑；`loadcheck` 只验证响应器注册成功；
+`preview.py` 绕过 engine 和 commands 直接调 `card.render_card`——被验证的恰好是没坏的那半条。
+
+### 补上的功能
+
+- **缓存命中不再丢菜单**：原来只存 PNG，第二次查同一条目「有图没菜单」。现在 `store`
+  把 `Plan` + 分节写成同名 `.json` 一起缓存，`engine._cached_result` 读回来；淘汰/清理时
+  PNG 与元数据成对删除，并扫掉孤儿元数据。缓存版本 `POLICY_VERSION` 升到 `p2`。
+- **空闲回收**：`ISAAC_WIKI_IDLE_CLOSE_MINUTES` 原先只声明没实现。现在
+  `engine.start_watchdog` 起一个全局唯一的空闲看门狗（只在真要渲染时才起），超时就关浏览器；
+  `register()` 里注册 `driver.on_shutdown(engine.shutdown)`，bot 退出时停看门狗 + 关浏览器，
+  不留孤儿 Chromium。
+- **群开关也管数字回选**：`_handle_number` 现在先查 `store.is_group_enabled`，关掉之后引用
+  旧菜单 / 直发数字都不再出图。
+- **失败降级**：浏览器或 playwright 起不来时，异常原本直接冒进 NoneBot 日志、用户什么都收不到；
+  现在会回「服务器上还没装好 playwright / chromium」+ 条目链接（`commands._unavailable_text`）。
+- **右上角 DLC 徽章**：3119d99 的规则只认「短文本」，漏掉了 `innerText` 为空的纯图标
+  （DLC 标记是绝对定位的小图标）。`CHROME_JS` 补了 `cornerIcon` 一类，C118 实图已确认清干净、
+  翻页箭头和贴图没被误伤。
+
+### 测试
+
+`tests/test_wiring.py`（10 项）盯的是「模块之间怎么调」，核心手法
+`unittest.mock.create_autospec`——按真实签名校验调用，参数漂移立刻失败。
+把上面两个 bug 改回去会挂 4 项（实测过）。`tools/loadcheck.py` 也补了「真读一次配置」的探针。
 
 ## 数据来源的关键事实（踩过的坑，别再查一遍）
 
@@ -54,7 +96,10 @@
   若无菜单，但词等于解析到的页面上的某个分节标题 → 也直接开那一节。
 - 慢查询先发「正在查询… + 链接」，出图后撤回；失败必须有明确回复。
 - 限流 3 秒/人；队列上限 3；连续 2 次渲染失败重启浏览器。
-- 缓存键 = 标题 + `lastrevid` + 策略版本 + 宽度；500MB LRU + 7 天 TTL。
+- 缓存 = 键（标题 + `lastrevid` + 策略版本 `p2` + 宽度）+ PNG + 同名 `.json` 元数据；
+  500MB LRU + 7 天 TTL，淘汰时成对删除。
+- 浏览器空闲 10 分钟自动关（`ISAAC_WIKI_IDLE_CLOSE_MINUTES`，0 = 不关），bot 退出时也会回收。
+- 群开关关掉后，「以撒 <词>」和数字回选都不再出图。
 
 ## 已解决的坑：嵌套标题导致首节被误测（妈腿）
 
@@ -86,19 +131,28 @@ $py = "$env:TEMP\isaac-probe-venv\Scripts\python.exe"     # 已装 playwright / 
 $env:PLAYWRIGHT_BROWSERS_PATH = "$env:LOCALAPPDATA\ms-playwright"
 $env:PYTHONUTF8 = '1'
 ```
-- 单测：`& $py -X utf8 -m pytest -q`（12 项）
-- 真实加载自检：`& $py -X utf8 tools\loadcheck.py`
+- 单测：`& $py -X utf8 -m pytest -q`（23 项，含 `test_wiring.py` 的接线用例）
+- 真实加载自检：`& $py -X utf8 tools\loadcheck.py`（顺带真读一次配置）
 - 出卡片：`& $py -X utf8 tools\preview.py 硫磺火 妈心 箱子 妈腿`
+- 走生产路径（engine.render_entry：缓存 + 元数据 + 菜单）：
+  `& $py -X utf8 tools\preview.py --via-engine 硫磺火`
 - 只看某一节：`& $py -X utf8 tools\preview.py 妈心 --section 它还活着`
+- 看清卡片顶部还浮着什么（chrome 规则是启发式的，wiki 改版后用它校准）：
+  `& $py -X utf8 tools\probe_chrome.py C118`
 
 以上命令都需要**联网提权**（访问 wiki）。浏览器用系统 Edge（脚本自动探测）。
 
 ## 下一步
 
-1. 修上面那个嵌套标题的分节划分 bug，重跑全量验收
-2. 部署到 `goat-repo/src/plugins/` 前：确认服务器已装 `beautifulsoup4` 和
-   `playwright`（`/usr/local/bin/python3.12 -m pip list | grep -iE 'beautifulsoup|playwright'`），
-   `requirements.txt` 补上 `beautifulsoup4`
-3. 卡片顶部还有个 wiki 自带的「道具/卡牌」小标签浮在右上角，可顺手清掉
-4. 把用法写进 `pm_config/isaac_wiki.yml`，让它出现在机器人的图片帮助菜单里
-5. 推远端 / 上商店（按项目惯例：用户自己在 GitHub 网页或 Desktop 操作）
+1. **部署**：`goat-repo` 里已备好四样东西——`src/plugins/nonebot_plugin_isaac_wiki/`
+   （10 个 .py，与源码 SHA256 一致）、`requirements.txt` 的 `beautifulsoup4==4.14.3`、
+   `pm_config/isaac_wiki.yml`、`.env.example` 的 `ISAAC_WIKI_*` 段。
+   服务器上 `git pull` → `pip install -r requirements.txt`（bs4 其实随 mediawiki 已经在了）
+   → 确认 chromium `playwright install chromium` → **重启 `python3.12 bot.py`**（Python 不热加载）。
+2. **推远端 / 上商店**（按项目惯例：用户自己在 GitHub 网页或 Desktop 操作）。
+   注意这个插件仓库目前**还没有远端**；上商店还需要 PyPI 发版流水线（照 `nonebot-plugin-dsh-release` 那套），
+   `PluginMetadata.homepage` 与 `pyproject.toml` 的 `homepage` 现在还是空串。
+3. 可选：把分节区间改成按**文档顺序**（`compareDocumentPosition`）划分，根治嵌套标题误测
+   （`SECTIONS_JS` / `APPLY_JS` / `TRIM_JS` 三个常量要一起改；目前靠 policy 兜着，线上不受影响）
+4. 可选清理：`parse.lead` / `plain_summary` / `sections` / `disambiguation_link`（只有测试引用）、
+   `CardResult.en_title`、`PageData.wikitext` / `categories`

@@ -12,7 +12,7 @@ from nonebot.plugin import PluginMetadata
 
 from .config import Config
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __plugin_meta__ = PluginMetadata(
     name="以撒 wiki 查询",

@@ -67,6 +67,19 @@ def main() -> int:
         print(f"     {p!r}")
     if not own:
         return _fail("前缀树里没有本插件的命令")
+
+    # 真读一次配置：这条路径以前写成 Config.parse_obj(get_driver().config)，
+    # pydantic v2 下会抛 ValidationError，而「加载成功」是看不出来的
+    commands = getattr(getattr(plugin, "module", None), "commands", None)
+    if commands is None:
+        return _fail("拿不到 commands 模块，没法验证配置解析")
+    try:
+        cfg = commands._cfg()
+    except Exception as exc:  # noqa: BLE001
+        return _fail(f"读插件配置失败：{type(exc).__name__}: {exc}")
+    print(f"[ok] 配置解析成功：宽度 {cfg.isaac_wiki_card_width}px，"
+          f"队列 {cfg.isaac_wiki_queue_limit}，"
+          f"空闲 {cfg.isaac_wiki_idle_close_minutes} 分钟回收浏览器")
     print("[ok] 自检通过（未连接 QQ）")
     return 0
 

@@ -1,6 +1,6 @@
 # nonebot-plugin-isaac-wiki
 
-查询[以撒的结合中文维基](https://isaac.huijiwiki.com/wiki/首页)的 NoneBot2 插件。
+查询[以撒的结合中文维基](https://isaac.huijiwiki.com/)的 NoneBot2 插件（OneBot V11）。
 
 ## 用法
 
@@ -8,12 +8,50 @@
 以撒 硫磺火
 ```
 
-## 实现说明
+| 命令 | 说明 |
+| --- | --- |
+| `以撒 <条目>` | 出卡片：道具、饰品、卡牌、胶囊、角色、怪物、房间、成就 |
+| `以撒帮助` | 用法说明 |
+| `以撒状态` | 超管：渲染队列、浏览器、缓存、本群开关 |
+| `以撒开关` | 超管：开关本群的以撒查询 |
 
-wiki 的 MediaWiki API（`/api.php`）被 Cloudflare 保护，普通 HTTP 客户端会被
-403 拦截。本插件用一个常驻的无头 Chromium 维持会话：
+卡片下面列出的内容可以回复数字继续看（60 秒内、只认提问者）；引用那条菜单消息再回数字，
+同群谁都能用，30 分钟内有效。
 
-- API 调用在 wiki 页面内用 `fetch()` 发出，携带浏览器会话；
-- 卡片图由该浏览器导航到条目页后，注入卡片样式并截图。
+## 依赖
 
-详见 `README` 与 `source.py` / `card.py`。
+- `beautifulsoup4`、`nonebot-plugin-localstore`，pip 装插件时会一起带上。
+- 出卡片还要 `playwright` 和浏览器：
+
+  ```
+  pip install playwright && playwright install chromium
+  ```
+
+  没装好时命令会明确回一句「服务器上还没装好 playwright / chromium」并附上条目链接，
+  而不是没反应。首次查询要等浏览器启动，慢一点是正常的。
+
+## 配置
+
+写在 bot 的 `.env` 里，前缀 `ISAAC_WIKI_`，全部有默认值：
+
+| 键 | 默认 | 说明 |
+| --- | --- | --- |
+| `ISAAC_WIKI_HEADLESS` | true | 无头浏览器；本地调试设 false 能看到渲染过程 |
+| `ISAAC_WIKI_CARD_WIDTH` | 760 | 卡片宽度（像素） |
+| `ISAAC_WIKI_TIMEOUT` | 30 | 页面导航超时（秒） |
+| `ISAAC_WIKI_RATE_LIMIT` | 3 | 同一人查询冷却（秒） |
+| `ISAAC_WIKI_MENU_TTL` | 60 | 直发数字的有效期（秒） |
+| `ISAAC_WIKI_QUOTE_TTL` | 1800 | 引用菜单消息的有效期（秒） |
+| `ISAAC_WIKI_QUEUE_LIMIT` | 3 | 渲染排队上限，超了直接回绝 |
+| `ISAAC_WIKI_CACHE_MB` | 500 | 卡片缓存总量上限 |
+| `ISAAC_WIKI_CACHE_TTL_DAYS` | 7 | 缓存有效期（天） |
+| `ISAAC_WIKI_IDLE_CLOSE_MINUTES` | 10 | 空闲多久关掉浏览器（0 = 不关） |
+
+## 坑
+
+- wiki 的 API 被 Cloudflare 挡着，普通 HTTP 客户端一律 403，把浏览器 cookie 复制出来也没用
+  （`__cf_bm` 绑 TLS 指纹）。所以查询和截图都在同一个常驻 Chromium 里做。
+- 正文是 JS 渲染的，偶尔返回空壳，插件会检测并重载；信息框贴图只在滚进视口时才绘制。
+- 于是进程会常驻一个浏览器（10 分钟不用自动关，bot 退出时会回收）。改了配置要重启 bot。
+
+设计细节、踩过的坑和本地验证方法见 [`docs/HANDOFF.md`](docs/HANDOFF.md)。

@@ -276,8 +276,8 @@ CHROME_JS = """
     const wrap = table.closest('.table-responsive');
     if (wrap) { wrap.classList.add('isaac-hide'); n++; }
   }
-  // 浮动在卡片上的分类徽章（右上角「道具 / 卡牌 / 饰品…」）：
-  // 绝对定位、纯中文短文本、贴着卡片顶部
+  // 浮在卡片顶部的分类徽章与 DLC 标记：绝对定位、贴右上角。
+  // 分两种：带短文本的（道具 / 卡牌 / 饰品…），和纯图标（DLC 标记 innerText 为空）。
   const rr = root.getBoundingClientRect();
   for (const el of Array.from(root.querySelectorAll('*'))) {
     const cs = getComputedStyle(el);
@@ -289,7 +289,11 @@ CHROME_JS = """
       && /^[A-Za-z\\u4e00-\\u9fa5]+$/.test(t);
     const atTop = r.top - rr.top < 140;
     const outOfCard = r.right > rr.right + 2;
-    if (outOfCard || (looksLikeBadge && atTop)) { el.classList.add('isaac-hide'); n++; }
+    const cornerIcon = t.length === 0 && r.width <= 60 && r.height <= 60
+      && r.right > rr.right - 48 && atTop;
+    if (outOfCard || (looksLikeBadge && atTop) || cornerIcon) {
+      el.classList.add('isaac-hide'); n++;
+    }
   }
   // 全站通知 / 弹层：按「我知道了」这类关闭按钮识别
   for (const el of Array.from(document.querySelectorAll('div, section, aside'))) {
