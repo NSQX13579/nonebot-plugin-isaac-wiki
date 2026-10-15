@@ -14,11 +14,15 @@ fingerprint.
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlencode
+
+log = logging.getLogger("isaac_wiki")
 
 API = "https://isaac.huijiwiki.com/api.php"
 BASE = "https://isaac.huijiwiki.com"
@@ -28,6 +32,37 @@ UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 Edg/126.0.0.0"
 )
+
+# Windows 本地开发时复用系统 Edge，省得再下 Playwright 浏览器
+EDGE_PATHS = (
+    r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+    r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+)
+
+
+def system_edge() -> str | None:
+    if os.name != "nt":
+        return None
+    for path in EDGE_PATHS:
+        if Path(path).exists():
+            return path
+    return None
+
+
+def launch_args() -> list[str]:
+    """启动参数。
+
+    服务器常以 root 跑，而 Chromium **拒绝在 root 下启动**（除非关掉 sandbox）——
+    报错是「Running as root without --no-sandbox is not supported」，而且看起来
+    像是「每个条目都失败」。容器里 /dev/shm 往往很小，一并绕开。
+    """
+    args = ["--disable-blink-features=AutomationControlled"]
+    if os.name == "posix":
+        args.append("--disable-dev-shm-usage")
+        geteuid = getattr(os, "geteuid", None)
+        if callable(geteuid) and geteuid() == 0:
+            args.append("--no-sandbox")
+    return args
 
 
 @dataclass
@@ -61,6 +96,7 @@ class BrowserWiki:
         self._page = None
         self._lock = asyncio.Lock()
         self._ready = False
+        self.content_ok = False       # 会话首页是否真的拿到了正文
 
     # -- lifecycle ---------------------------------------------------------
     async def start(self) -> None:
@@ -69,12 +105,10 @@ class BrowserWiki:
         self._pw = await async_playwright().start()
         kwargs: dict[str, Any] = {
             "headless": self.headless,
-            "args": ["--disable-blink-features=AutomationControlled"],
+            "args": launch_args(),
         }
-        # Windows local development: reuse the installed Edge instead of
-        # downloading a Playwright browser.
-        edge = r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
-        if os.name == "nt" and Path(edge).exists():
+        edge = system_edge()
+        if edge:
             kwargs["executable_path"] = edge
         self._browser = await self._pw.chromium.launch(**kwargs)
         self._context = await self._browser.new_context(
@@ -113,8 +147,12 @@ class BrowserWiki:
             pass
         try:
             await self._page.wait_for_selector(".mw-parser-output", timeout=25000)
+            self.content_ok = True
         except Exception:  # noqa: BLE001
-            pass
+            # 没等到正文：多半是被 Cloudflare 挑战了（机房 IP 常见），
+            # 记下来，后面 API 报错时能对上号
+            self.content_ok = False
+            log.warning("isaac_wiki: 首页没等到正文选择器，可能被 Cloudflare 挑战")
         self._ready = True
 
     async def refresh_session(self) -> None:
@@ -122,11 +160,8 @@ class BrowserWiki:
         await self.ensure_session()
 
     # -- API ---------------------------------------------------------------
-    async def api(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Call the MediaWiki API from inside the wiki page."""
-        await self.ensure_session()
-        query = urlencode({**params, "format": "json"})
-        url = f"{API}?{query}"
+    async def _fetch_in_page(self, url: str) -> tuple[int, str]:
+        """在页面里用 fetch 调接口（带着浏览器会话）。"""
         async with self._lock:
             result = await self._page.evaluate(
                 """async (u) => {
@@ -135,22 +170,45 @@ class BrowserWiki:
                    }""",
                 url,
             )
-        if result["status"] == 403:
-            # session expired: reload once and retry
-            await self.refresh_session()
-            async with self._lock:
-                result = await self._page.evaluate(
-                    """async (u) => {
-                         const r = await fetch(u, {headers: {'Accept': 'application/json'}});
-                         return {status: r.status, body: await r.text()};
-                       }""",
-                    url,
-                )
-        if result["status"] != 200:
-            raise RuntimeError(f"wiki api status {result['status']}: {result['body'][:200]}")
-        import json
+        return int(result["status"]), str(result["body"])
 
-        return json.loads(result["body"])
+    async def _navigate_api(self, url: str) -> tuple[int, str]:
+        """改成顶层导航取接口内容。
+
+        页内 fetch 被 Cloudflare 挡掉时（403），文档级请求往往还能过；顺便把真实
+        状态码带回来，报错才有信息量。
+        """
+        try:
+            resp = await self._page.goto(url, wait_until="commit", timeout=15000)
+        except Exception as exc:  # noqa: BLE001
+            return 0, f"navigate failed: {type(exc).__name__}: {exc}"
+        status = resp.status if resp is not None else 0
+        try:
+            body = await self._page.evaluate(
+                "() => document.body ? document.body.innerText : ''"
+            )
+        except Exception:  # noqa: BLE001
+            body = ""
+        return status, body
+
+    async def api(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Call the MediaWiki API from inside the wiki page."""
+        await self.ensure_session()
+        url = f"{API}?{urlencode({**params, 'format': 'json'})}"
+        status, body = await self._fetch_in_page(url)
+        if status == 403:
+            log.warning("isaac_wiki: api 403，刷新会话后重试")
+            await self.refresh_session()
+            status, body = await self._fetch_in_page(url)
+        if status == 403:
+            log.warning("isaac_wiki: api 仍被 403，改用顶层导航")
+            status, body = await self._navigate_api(url)
+        if status != 200:
+            raise RuntimeError(f"wiki api status {status}: {body[:160]!r}")
+        try:
+            return json.loads(body)
+        except ValueError as exc:
+            raise RuntimeError(f"wiki api 返回的不是 JSON：{body[:120]!r}") from exc
 
     async def resolve(self, title: str) -> tuple[str, list[str]]:
         """Follow redirects for *title*; returns (canonical title, redirect chain)."""

@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -441,19 +442,22 @@ class CardResult:
 
 async def _load(browser_wiki, title: str, *, attempts: int = 3) -> bool:
     """导航并等到「真内容」；wiki 会间歇返回未渲染的空壳，检测到就重载。"""
-    import json
-
     page = browser_wiki.page
     url = await browser_wiki.page_url(title)
-    slug = url.split("/wiki/", 1)[-1]
-    # 必须确认「已经在目标页」——否则上一页的 DOM 会让内容检查立刻通过
+    # 「是不是已经在新文档里」用哨兵变量判断：导航前在当前文档上打个标记，
+    # 新文档里这个标记会消失。比比较 URL 靠谱——wiki 会把别名重定向
+    # （硫磺火 → C118），比对请求时的 URL 会永远等不到「落地」。
     ready_js = (
-        "() => { if (!location.href.includes(" + json.dumps(slug) + ")) return false;"
+        "() => { if (window.__isaacPrevNav) return false;"
         " const r = document.querySelector('.mw-parser-output');"
         " return !!r && (r.querySelectorAll('h2,h3,h4,h5,h6').length > 0"
         " || r.innerHTML.length > 20000); }"
     )
     for _ in range(attempts):
+        try:
+            await page.evaluate("() => { window.__isaacPrevNav = true; }")
+        except Exception:  # noqa: BLE001
+            pass
         try:
             await page.goto(url, wait_until="commit", timeout=15000)
         except Exception:  # noqa: BLE001
@@ -464,8 +468,23 @@ async def _load(browser_wiki, title: str, *, attempts: int = 3) -> bool:
                 if await page.evaluate(ready_js):
                     return True
             except Exception:  # noqa: BLE001
-                continue
+                continue          # 新文档还在建立（context destroyed）
         log.warning("isaac_wiki: %s 返回空壳，重载", title)
+        # 排查用：ISAAC_DUMP_SHELL=<路径> 会把「空壳」页面存下来看看 wiki 到底返回了什么
+        dump = os.environ.get("ISAAC_DUMP_SHELL")
+        if dump:
+            try:
+                html = await page.content()
+                out = Path(dump)
+                out.parent.mkdir(parents=True, exist_ok=True)
+                out.write_text(html, encoding="utf-8")
+                log.warning("isaac_wiki: 空壳 HTML 已存到 %s（%s 字节）", out, len(html))
+            except Exception as exc:  # noqa: BLE001
+                log.warning("isaac_wiki: 存空壳 HTML 失败 %s", exc)
+        try:
+            await page.evaluate("() => { window.__isaacPrevNav = true; }")
+        except Exception:  # noqa: BLE001
+            pass
         try:
             await page.reload(wait_until="commit", timeout=15000)
         except Exception:  # noqa: BLE001

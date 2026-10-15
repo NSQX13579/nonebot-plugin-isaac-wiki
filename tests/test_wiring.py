@@ -61,12 +61,14 @@ class _FakeWiki:
 class _FakeBot:
     def __init__(self) -> None:
         self.sent: list = []
+        self.deleted: list = []
 
     async def send(self, event, message, **kwargs):
         self.sent.append(message)
         return {"message_id": len(self.sent)}
 
     async def delete_msg(self, **kwargs):
+        self.deleted.append(kwargs.get("message_id"))
         return None
 
 
@@ -233,6 +235,7 @@ def test_render_feedback_wires_config_into_engine(isolated, monkeypatch):
         bot, _group_event(), "硫磺火", canonical="硫磺火"))
 
     assert any("📕" in str(m) for m in bot.sent), "没出卡片，命令层在更早的地方挂了"
+    assert bot.deleted == [1], "出图后应该撤回「正在查询」的回执"
     kwargs = spy.call_args.kwargs
     assert kwargs["idle_close_minutes"] == 10
     assert kwargs["width"] == 760
@@ -249,10 +252,47 @@ def test_missing_browser_degrades_to_a_text_reply(isolated, monkeypatch):
 
     asyncio.run(commands._render_with_feedback(bot, _group_event(), "硫磺火"))
 
-    assert len(bot.sent) == 1
-    text = str(bot.sent[0])
-    assert "playwright" in text
-    assert "isaac.huijiwiki.com" in text
+    assert len(bot.sent) == 2
+    notice, reply = (str(m) for m in bot.sent)
+    assert "正在查询" in notice, "回执要在解析之前就发出去"
+    assert "playwright" in reply
+    assert "isaac.huijiwiki.com" in reply
+    assert bot.deleted == [1]
+
+
+def test_failure_reply_carries_the_real_cause(isolated, monkeypatch):
+    """服务器上报错只有「（RuntimeError）」等于没线索：要带上真实状态码和原因。"""
+    async def broken_get_wiki(headless, timeout):
+        raise RuntimeError("wiki api status 403: 'Just a moment...'")
+
+    monkeypatch.setattr(engine, "_get_wiki", broken_get_wiki)
+    bot = _FakeBot()
+
+    asyncio.run(commands._render_with_feedback(bot, _group_event(), "爸爸的便条"))
+
+    assert len(bot.sent) == 2
+    notice, reply = (str(m) for m in bot.sent)
+    assert "正在查询" in notice and "爸爸的便条" in notice
+    assert "403" in reply and "RuntimeError" in reply
+    assert "selfcheck" in reply
+
+
+def test_env_hint_maps_common_deploy_problems():
+    """环境类故障要给出可操作的提示，认不出来时不许瞎猜。"""
+    from nonebot_plugin_isaac_wiki import commands as c
+    from nonebot_plugin_isaac_wiki import source
+
+    assert "playwright install chromium" in c._env_hint(
+        RuntimeError("Executable doesn't exist at /root/.cache/ms-playwright/x"))
+    assert "root" in c._env_hint(
+        RuntimeError("Running as root without --no-sandbox is not supported"))
+    assert "pip install playwright" in c._env_hint(
+        ImportError("No module named 'playwright'"))
+    assert c._env_hint(RuntimeError("wiki api status 403: 'Just a moment...'")) == ""
+
+    # 服务器以 root 跑时，启动参数里必须自带 --no-sandbox，否则 Chromium 直接拒绝启动
+    args = source.launch_args()
+    assert "--disable-blink-features=AutomationControlled" in args
 
 
 # --- 缓存清理 ---------------------------------------------------------------

@@ -53,6 +53,14 @@
 - **自己踩的坑**：`cornerIcon` 规则会把我们**自己插进标题栏的 DLC 图标槽位**也当徽章隐藏
   （槽位同样是「绝对定位 + 无文本 + 贴右上角」）。所有清理循环都加了
   `el.closest('.isaac-titlebar')` 例外，改这类启发式规则时记得保留。
+- **服务器上「每个条目都失败」怎么查**：失败回复原先只有「（RuntimeError）」，等于没线索。
+  现在失败回复带真实原因（状态码/异常消息）+ 环境提示，并 `log.exception` 打完整堆栈；
+  `source.launch_args()` 还会自动处理 **root 下 Chromium 拒绝启动**
+  （加 `--no-sandbox`，容器里再带 `--disable-dev-shm-usage`）——服务器上最常见的死因。
+  另外 `nonebot_plugin_isaac_wiki/selfcheck.py` 可以在服务器上五步定位：
+  ```bash
+  cd /home/goat/src/plugins && /usr/local/bin/python3.12 nonebot_plugin_isaac_wiki/selfcheck.py
+  ```
 
 ### 测试
 
@@ -64,7 +72,12 @@
 
 1. `/api.php` 被 Cloudflare 挡；**必须在真实浏览器页面里 `fetch`** 才能调通
    （复制 cookie 给 httpx 也没用，`__cf_bm` 绑 TLS 指纹）。
+   页内 fetch 仍被 403 时，`source.api()` 会再用**顶层导航**取一次（文档请求更容易过）。
 2. 页面正文是 JS 渲染的，会**间歇返回空壳**（6KB、0 个分节）→ 要检测并重载。
+   注意「空壳」的判据**不能拿 URL 比**：wiki 会把别名重定向（`硫磺火` → `C118`），
+   比请求时的 URL 会永远等不到「落地」、白等 60 秒后误报「页面未能渲染」。
+   现在改成在旧文档上打哨兵（`window.__isaacPrevNav`）：新文档里哨兵消失 = 已换页。
+   排查时可用环境变量 `ISAAC_DUMP_SHELL=<路径>` 把「空壳」HTML 存下来看。
 3. `DOMContentLoaded`/`load` 很晚甚至不触发 → 导航用 `wait_until="commit"`。
 4. **同一页面只导航一次**，重复导航会打断渲染（只剩信息框）。
 5. 信息框贴图是 Anm2 部件画在 `<canvas>` 上的，**只在滚进视口时才绘制** →
@@ -150,6 +163,8 @@ $env:PYTHONUTF8 = '1'
 - 只看某一节：`& $py -X utf8 tools\preview.py 妈心 --section 它还活着`
 - 看清卡片顶部还浮着什么（chrome 规则是启发式的，wiki 改版后用它校准）：
   `& $py -X utf8 tools\probe_chrome.py C118`
+- 全流程自检（部署到服务器后查故障就用它，不需要 NoneBot）：
+  `& $py -X utf8 nonebot_plugin_isaac_wiki\selfcheck.py`
 
 以上命令都需要**联网提权**（访问 wiki）。浏览器用系统 Edge（脚本自动探测）。
 

@@ -70,23 +70,49 @@ def _plain(event: GroupMessageEvent) -> str:
     return event.get_message().extract_plain_text().strip()
 
 
+def _env_hint(exc: Exception) -> str:
+    """环境类故障给一句可操作的提示（认不出来就返回空串）。"""
+    text = f"{type(exc).__name__}: {exc}".lower()
+    if "no module named" in text and "playwright" in text:
+        return "服务器还没装 playwright：pip install playwright"
+    if "executable doesn't exist" in text or "missing dependencies" in text:
+        return "浏览器或系统库没装好：playwright install chromium（必要时 playwright install-deps）"
+    if "no-sandbox" in text or "running as root" in text:
+        return "Chromium 在 root 下要关 sandbox：插件已自动加 --no-sandbox，仍报错就查系统库"
+    return ""
+
+
 def _browser_missing(exc: Exception) -> bool:
     """是不是「浏览器/playwright 没装好」这一类错误。"""
     text = f"{type(exc).__name__}: {exc}"
-    return (
-        isinstance(exc, ImportError)
-        or "playwright" in text.lower()
-        or "Executable doesn't exist" in text
-    )
+    return isinstance(exc, ImportError) or bool(_env_hint(exc)) or "playwright" in text.lower()
 
 
 def _unavailable_text(term: str, exc: Exception) -> str:
-    if _browser_missing(exc):
-        return (
-            "以撒 wiki 靠浏览器抓页面，服务器上还没装好 playwright / chromium。\n"
-            f"先直接看 wiki 吧：{_link(term)}"
-        )
-    return f"wiki 暂时连不上（{type(exc).__name__}），稍后再试。\n{_link(term)}"
+    lines = [f"wiki 暂时连不上（{_cause(exc)}），稍后再试。"]
+    hint = _env_hint(exc)
+    if hint:
+        lines.append(hint)
+    lines.append(f"先直接看 wiki：{_link(term)}")
+    lines.append("服务器上可跑 src/plugins/nonebot_plugin_isaac_wiki/selfcheck.py 看卡在哪一步")
+    return "\n".join(lines)
+
+
+def _cause(exc: Exception) -> str:
+    """带上异常内容和状态码，不然「（RuntimeError）」等于没写。"""
+    text = " ".join(str(exc).split())
+    if len(text) > 300:
+        text = text[:300] + "…"
+    return f"{type(exc).__name__}: {text}" if text else type(exc).__name__
+
+
+def _failure_text(head: str, exc: Exception) -> str:
+    """失败回复：带上真实原因，环境类问题再补一句怎么办。"""
+    lines = [f"{head}（{_cause(exc)}）"]
+    hint = _env_hint(exc)
+    if hint:
+        lines.append(hint)
+    return "\n".join(lines)
 
 
 def _is_menu_reply(event: GroupMessageEvent) -> bool:
@@ -123,6 +149,11 @@ async def _render_with_feedback(bot: Bot, event: GroupMessageEvent, term: str,
                                 section_label: str = "") -> None:
     cfg = _cfg()
     title = canonical or term
+    # 回执先发：冷启动要拉浏览器 + 建会话，解析条目这一步本身就可能好几秒；
+    # 原来的顺序是「先解析再回执」，解析一挂就变成完全没反应
+    notice = await bot.send(event, f"🔍 正在查询「{title}」…\n{_link(title)}")
+    notice_id = notice.get("message_id") if isinstance(notice, dict) else None
+
     page = None
     if canonical is None:
         # 浏览器起不来（没装 playwright/chromium）也要有明确回复，
@@ -131,7 +162,8 @@ async def _render_with_feedback(bot: Bot, event: GroupMessageEvent, term: str,
             wiki = await _ensure_wiki_for_meta(cfg)
             canonical, chain = await wiki.resolve(term)
         except Exception as exc:  # noqa: BLE001
-            log.warning("isaac_wiki: 浏览器/接口不可用 %s", exc)
+            log.exception("isaac_wiki: 浏览器/接口不可用")
+            await _withdraw(bot, notice_id)
             await bot.send(event, _unavailable_text(term, exc))
             return
         if not canonical:
@@ -141,22 +173,17 @@ async def _render_with_feedback(bot: Bot, event: GroupMessageEvent, term: str,
                 log.warning("isaac_wiki: 搜索失败 %s", exc)
                 hits = []
             if not hits:
+                await _withdraw(bot, notice_id)
                 await bot.send(event, f"没找到「{term}」。试试直接发条目名，或看 wiki 搜索：{_link(term)}")
                 return
             lines = ["没找到精确条目，看看这些："]
             for i, h in enumerate(hits[:5], 1):
                 lines.append(f"{i} {h.title}")
+            await _withdraw(bot, notice_id)
             await bot.send(event, "\n".join(lines) + f"\n（也可以直接发：以撒 <名称>）")
             return
         title = canonical
         page = await wiki.fetch(canonical)
-
-    # 慢查询先给个回执（附链接，急需时可以直接点）
-    notice = await bot.send(
-        event,
-        f"🔍 正在查询《{parse.title(page.html) if page else term}》…\n{_link(canonical)}",
-    )
-    notice_id = notice.get("message_id") if isinstance(notice, dict) else None
 
     try:
         if page is None:
@@ -182,8 +209,8 @@ async def _render_with_feedback(bot: Bot, event: GroupMessageEvent, term: str,
         return
     except Exception as exc:  # noqa: BLE001
         await _withdraw(bot, notice_id)
-        log.warning("isaac_wiki: 渲染失败 %s", exc)
-        await bot.send(event, f"wiki 暂时连不上（{type(exc).__name__}），稍后再试。\n{_link(canonical)}")
+        log.exception("isaac_wiki: 渲染失败")
+        await bot.send(event, _failure_text("出图失败", exc) + f"\n{_link(canonical)}")
         return
 
     await _withdraw(bot, notice_id)
