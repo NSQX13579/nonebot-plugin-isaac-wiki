@@ -54,10 +54,13 @@ PROBE_JS = """
     const r = el.getBoundingClientRect();
     if (r.width < 6 || r.height < 6) continue;
     if (r.bottom < rr.top - 40 || r.top > rr.top + 240) continue;
+    const tips = Array.from(el.querySelectorAll('[title]'))
+      .map((n) => (n.getAttribute('title') || '').trim()).filter(Boolean);
     floating.push({tag: el.tagName, cls: String(el.className || '').slice(0, 60),
                    pos: cs.position, float: cs.cssFloat, ...box(el),
                    text: (el.innerText || '').trim().slice(0, 24),
-                   html: el.outerHTML.slice(0, 120)});
+                   tips: tips.slice(0, 4),
+                   html: el.outerHTML.slice(0, 400)});
   }
   const badges = [];
   for (const el of Array.from(document.querySelectorAll(
@@ -92,6 +95,8 @@ async def probe(wiki, title: str) -> None:
         print(f"    {item['tag']} .{item['cls']} {item['pos']}/{item['float']} "
               f"top={item['top']} left={item['left']} {item['w']}x{item['h']} "
               f"text={item['text']!r}")
+        if item.get("tips"):
+            print(f"      title: {' | '.join(item['tips'])}")
         print(f"      {item['html']}")
     print(f"  dlc/badge/tag 类名元素（{len(data['badges'])} 个）：")
     for item in data["badges"]:
