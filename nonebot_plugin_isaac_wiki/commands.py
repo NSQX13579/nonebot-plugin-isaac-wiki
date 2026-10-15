@@ -1,24 +1,282 @@
-"""NoneBot 命令注册。
+"""命令层：查询、数字回选（直发 + 引用）、直接打开、开关。
 
-注册集中在 :func:`register`，由插件包 ``__init__`` 调用；这样纯逻辑模块
-（parse / card / source）可以在没有 NoneBot 运行时的环境里单独导入。
+注册集中在 :func:`register`，由插件包的 ``__init__`` 调用；这样
+parse / policy / card / source 这些纯逻辑模块可以在没有 NoneBot 运行时的
+环境里单独导入（预览工具与单测都靠这一点）。
 """
 
 from __future__ import annotations
 
-from nonebot import on_command
+import logging
+import re
+import time
+from pathlib import Path
+
+from nonebot import on_command, on_message
 from nonebot.adapters import Message
-from nonebot.adapters.onebot.v11 import GroupMessageEvent, MessageSegment
+from nonebot.adapters.onebot.v11 import (
+    Bot,
+    GroupMessageEvent,
+    Message as V11Message,
+    MessageSegment,
+)
 from nonebot.params import CommandArg
+from nonebot.permission import SUPERUSER
+from nonebot.rule import Rule
+from . import engine, parse, state, store
+from .config import Config
+
+log = logging.getLogger("isaac_wiki")
+
+WIKI_BASE = "https://isaac.huijiwiki.com/wiki/"
+HELP = (
+    "用法：以撒 <道具/角色/怪物/房间…>\n"
+    "例：以撒 硫磺火 · 以撒 D6 · 以撒 妈心\n"
+    "查完会出卡片；卡片下面列出的内容可以回复数字看。"
+)
+
+_last_call: dict[tuple[int, int], float] = {}
+
+
+def _cfg() -> Config:
+    from nonebot import get_driver
+
+    return Config.parse_obj(get_driver().config)
+
+
+def _link(canonical: str) -> str:
+    safe = canonical.replace(" ", "_")
+    from urllib.parse import quote
+
+    return WIKI_BASE + quote(safe)
+
+
+def _quoted_id(event: GroupMessageEvent) -> int | None:
+    for seg in event.get_message():
+        if seg.type == "reply":
+            try:
+                return int(seg.data.get("id"))
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+def _plain(event: GroupMessageEvent) -> str:
+    return event.get_message().extract_plain_text().strip()
+
+
+def _is_menu_reply(event: GroupMessageEvent) -> bool:
+    text = _plain(event)
+    quoted = _quoted_id(event)
+    if quoted is not None and state.by_message(quoted) is not None:
+        return True
+    return bool(re.fullmatch(r"\d{1,2}", text))
+
+
+menu_reply = on_message(rule=Rule(_is_menu_reply), priority=11, block=False)
+
+
+async def _send_card(bot: Bot, event: GroupMessageEvent, res, text: str) -> int | None:
+    """发「图 + 文」一条消息，返回 message_id。"""
+    msg = V11Message(MessageSegment.image(Path(res.path))) + MessageSegment.text("\n" + text)
+    try:
+        out = await bot.send(event, msg)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("isaac_wiki: 发图失败 %s", exc)
+        await bot.send(event, V11Message(MessageSegment.text(text)))
+        return None
+    if isinstance(out, dict):
+        try:
+            return int(out.get("message_id"))
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+async def _render_with_feedback(bot: Bot, event: GroupMessageEvent, term: str,
+                                *, keep_idx: list[int] | None = None,
+                                canonical: str | None = None,
+                                section_label: str = "") -> None:
+    cfg = _cfg()
+    title = canonical or term
+    page = None
+    if canonical is None:
+        wiki = await _ensure_wiki_for_meta(cfg)
+        canonical, chain = await wiki.resolve(term)
+        if not canonical:
+            hits = await wiki.search(term, limit=5)
+            if not hits:
+                await bot.send(event, f"没找到「{term}」。试试直接发条目名，或看 wiki 搜索：{_link(term)}")
+                return
+            lines = ["没找到精确条目，看看这些："]
+            for i, h in enumerate(hits[:5], 1):
+                lines.append(f"{i} {h.title}")
+            await bot.send(event, "\n".join(lines) + f"\n（也可以直接发：以撒 <名称>）")
+            return
+        title = canonical
+        page = await wiki.fetch(canonical)
+
+    # 慢查询先给个回执（附链接，急需时可以直接点）
+    notice = await bot.send(
+        event,
+        f"🔍 正在查询《{parse.title(page.html) if page else term}》…\n{_link(canonical)}",
+    )
+    notice_id = notice.get("message_id") if isinstance(notice, dict) else None
+
+    try:
+        if page is None:
+            wiki = await _ensure_wiki_for_meta(cfg)
+            page = await wiki.fetch(canonical)
+        boss = parse.is_boss(page.html, canonical)
+        res = await engine.render_entry(
+            canonical,
+            headless=cfg.isaac_wiki_headless,
+            timeout=cfg.isaac_wiki_timeout,
+            width=cfg.isaac_wiki_card_width,
+            is_boss=boss,
+            keep_idx=keep_idx,
+            queue_limit=cfg.isaac_wiki_queue_limit,
+            cache_mb=cfg.isaac_wiki_cache_mb,
+            cache_ttl_days=cfg.isaac_wiki_cache_ttl_days,
+            use_cache=keep_idx is None,
+        )
+    except engine.QueueFull:
+        await _withdraw(bot, notice_id)
+        await bot.send(event, "前面还有人在查，稍等一下再试～")
+        return
+    except Exception as exc:  # noqa: BLE001
+        await _withdraw(bot, notice_id)
+        log.warning("isaac_wiki: 渲染失败 %s", exc)
+        await bot.send(event, f"wiki 暂时连不上（{type(exc).__name__}），稍后再试。\n{_link(canonical)}")
+        return
+
+    await _withdraw(bot, notice_id)
+
+    info = parse.infobox(page.html)
+    head = info.title or canonical
+    if section_label:
+        head = f"{head} · {section_label}"
+    lines = [f"📕 {head}", _link(canonical)]
+    if res.plan.menu:
+        lines.append("还能看（回复数字）：")
+        lines += [f"{i} {label}" for i, label in enumerate(res.plan.menu, 1)]
+
+    mid = await _send_card(bot, event, res, "\n".join(lines))
+    if mid is not None and res.plan.menu:
+        # 菜单项标题 -> 分节下标（同名分节取最先出现的一个）
+        by_label: dict[str, int] = {}
+        for sec in res.sections:
+            by_label.setdefault(sec.title, sec.idx)
+        items = [state.MenuItem(label=lab, kind="section", payload=str(by_label[lab]))
+                 for lab in res.plan.menu if lab in by_label]
+        if not items:
+            return
+        state.register(state.Menu(
+            message_id=mid, group_id=event.group_id, user_id=event.user_id,
+            title=head, canonical=canonical, items=items,
+        ))
+
+
+async def _withdraw(bot: Bot, message_id) -> None:
+    if message_id is None:
+        return
+    try:
+        await bot.delete_msg(message_id=int(message_id))
+    except Exception:  # noqa: BLE001
+        pass
+
+
+async def _ensure_wiki_for_meta(cfg: Config):
+    """只在需要 API 时确保浏览器就绪（渲染本身也会用到同一个实例）。"""
+    return await engine._get_wiki(cfg.isaac_wiki_headless, cfg.isaac_wiki_timeout)
+
+
+@menu_reply.handle()
+async def _handle_number(bot: Bot, event: GroupMessageEvent) -> None:
+    cfg = _cfg()
+    text = _plain(event)
+    quoted = _quoted_id(event)
+    menu = None
+    if quoted is not None:
+        menu = state.by_message(quoted, ttl=cfg.isaac_wiki_quote_ttl)
+    if menu is None:
+        if not re.fullmatch(r"\d{1,2}", text):
+            return
+        menu = state.consume_for_user(event.group_id, event.user_id,
+                                      ttl=cfg.isaac_wiki_menu_ttl)
+    if menu is None:
+        return
+    item = menu.pick(int(text))
+    if item is None:
+        return
+    if item.kind == "section" and item.payload.isdigit():
+        await _render_with_feedback(
+            bot, event, menu.canonical, canonical=menu.canonical,
+            keep_idx=[int(item.payload)], section_label=item.label,
+        )
+
+
+isaac = on_command("以撒", aliases={"isaac", "以撒wiki", "查以撒"}, priority=12)
+
+
+@isaac.handle()
+async def _handle_query(bot: Bot, event: GroupMessageEvent, arg: Message = CommandArg()) -> None:
+    cfg = _cfg()
+    term = arg.extract_plain_text().strip()
+
+    if not store.is_group_enabled(event.group_id):
+        return
+    if term in ("帮助", "help", "?"):
+        await isaac.finish(HELP)
+    if not term:
+        await isaac.finish(HELP)
+
+    # 限流
+    key = (event.group_id, event.user_id)
+    now = time.time()
+    if now - _last_call.get(key, 0.0) < cfg.isaac_wiki_rate_limit:
+        await isaac.finish("刚查过啦，缓一缓～")
+    _last_call[key] = now
+
+    # 直接打开：查询词命中刚发出的菜单项
+    menu = state.peek_for_user(event.group_id, event.user_id,
+                               ttl=cfg.isaac_wiki_menu_ttl)
+    if menu is not None:
+        for item in menu.items:
+            if item.label == term and item.payload.isdigit():
+                await _render_with_feedback(
+                    bot, event, menu.canonical, canonical=menu.canonical,
+                    keep_idx=[int(item.payload)], section_label=item.label,
+                )
+                return
+
+    await _render_with_feedback(bot, event, term)
+
+
+admin = on_command("以撒状态", priority=12, permission=SUPERUSER)
+switch = on_command("以撒开关", priority=12, permission=SUPERUSER)
+
+
+@admin.handle()
+async def _handle_admin(bot: Bot, event: GroupMessageEvent) -> None:
+    stats = store.cache_stats()
+    await admin.finish(
+        "以撒 wiki 状态：\n"
+        f"渲染队列：{engine.busy_count()} 个等待\n"
+        f"浏览器空闲：{int(engine.idle_seconds())} 秒\n"
+        f"缓存：{stats['count']} 张 / {stats['bytes'] / 1048576:.1f} MB\n"
+        f"本群：{'开启' if store.is_group_enabled(event.group_id) else '关闭'}"
+    )
+
+
+@switch.handle()
+async def _handle_switch(bot: Bot, event: GroupMessageEvent) -> None:
+    if not isinstance(event, GroupMessageEvent):
+        await switch.finish("这个命令要在群里用。")
+    enabled = store.toggle_group(event.group_id)
+    await switch.finish(f"本群以撒查询：{'已开启' if enabled else '已关闭'}")
 
 
 def register() -> None:
-    isaac = on_command("以撒", aliases={"isaac"}, priority=12)
-
-    @isaac.handle()
-    async def _handle(event: GroupMessageEvent, arg: Message = CommandArg()):
-        term = arg.extract_plain_text().strip()
-        if not term:
-            await isaac.finish("用法：以撒 硫磺火")
-        # TODO: 接 search/卡图管道；当前仅占位，便于 loadcheck 验证接线
-        await isaac.finish(MessageSegment.text(f"收到查询：{term}"))
+    """保持与其他插件一致的入口（导入本模块即完成注册）。"""
+    log.debug("isaac_wiki: commands registered")

@@ -17,7 +17,16 @@ __version__ = "0.1.0"
 __plugin_meta__ = PluginMetadata(
     name="以撒 wiki 查询",
     description="查询以撒的结合中文 wiki：道具、饰品、卡牌、胶囊、角色、怪物、房间、成就",
-    usage="以撒 硫磺火",
+    usage=(
+        "以撒 <条目>    查询（如：以撒 硫磺火、以撒 妈心）\n"
+        "以撒           用法说明\n"
+        "以撒帮助       完整说明\n"
+        "以撒状态       超管：运行状态\n"
+        "以撒开关       超管：开关本群查询\n"
+        "\n"
+        "卡片下方列出的内容可以回复数字查看（60 秒内）；"
+        "引用那条菜单消息再回复数字，随时都能看。"
+    ),
     type="application",
     homepage="",
     config=Config,

@@ -2,7 +2,7 @@
 
 不连接 QQ、不发送任何消息。用法（仓库根目录）::
 
-    pip install -e . nonebot2[fastapi] nonebot-adapter-onebot
+    pip install -e . "nonebot2[fastapi]" nonebot-adapter-onebot beautifulsoup4 playwright
     python tools/loadcheck.py
 """
 
@@ -40,21 +40,33 @@ def main() -> int:
     plugin = nonebot.load_plugin("nonebot_plugin_isaac_wiki")
     if plugin is None:
         return _fail("插件加载失败")
-    __plugin_meta__ = plugin.metadata
-    print(f"[ok] 插件已加载：{__plugin_meta__.name}")
-    print(f"     用法：{__plugin_meta__.usage}")
+    meta = plugin.metadata
+    print(f"[ok] 插件已加载：{meta.name if meta else '?'}")
+    if meta:
+        print(f"     用法：{meta.usage}")
 
-    # 响应器探针
     from nonebot.matcher import matchers
 
-    groups = {key: value for key, value in matchers.items() if value}
-    total = sum(len(group) for group in groups.values())
+    groups = {k: v for k, v in matchers.items() if v}
+    total = sum(len(g) for g in groups.values())
     print(f"[ok] 已注册响应器：{total} 个")
     for key, group in groups.items():
         for matcher in group:
-            print(f"     - #{key}  priority={matcher.priority}  block={matcher.block}")
+            print(f"     - #{key} priority={matcher.priority} block={matcher.block}")
     if total == 0:
         return _fail("没有注册到任何响应器")
+
+    # 指令前缀探针：列出注册进前缀树、且属于本插件的命令前缀
+    from nonebot.rule import TrieRule
+
+    keys = sorted(TrieRule.prefix.keys())
+    own = [p for p in keys if ("以撒" in p or "isaac" in p)]
+    print(f"[ok] 前缀树共 {len(keys)} 个前缀，抽样：{keys[:6]}")
+    print("[ok] 已注册命令前缀：")
+    for p in own:
+        print(f"     {p!r}")
+    if not own:
+        return _fail("前缀树里没有本插件的命令")
     print("[ok] 自检通过（未连接 QQ）")
     return 0
 

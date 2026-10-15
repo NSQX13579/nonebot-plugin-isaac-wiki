@@ -41,14 +41,39 @@ def make_soup(html: str) -> BeautifulSoup:
     return BeautifulSoup(html, "html.parser")
 
 
+def _name_row(box: Tag) -> Tag | None:
+    """信息框里「名字」那一行。
+
+    道具页的名字在带 ``<big>`` 英文名的 header 里，而 ``.infobox-title`` 可能被
+    前后翻页的箭头占用；实体页则相反（名字在 ``.infobox-title``）。所以先找带
+    ``<big>`` 的行，再退回 ``.infobox-title``，最后取第一个 header。
+    """
+    head = box.select_one(".infobox-header:has(big)")
+    if head is not None:
+        return head
+    title_row = box.select_one(".infobox-title")
+    if title_row is not None and not _is_nav_row(title_row):
+        return title_row
+    for row in box.select(".infobox-header"):
+        if not _is_nav_row(row):
+            return row
+    return title_row
+
+
+def _is_nav_row(row: Tag) -> bool:
+    """纯箭头/导航行（如 ← 硫磺火 →）不是名字行。"""
+    text = row.get_text(" ", strip=True)
+    cleaned = re.sub(r"[←→\s]+", "", text)
+    return len(cleaned) <= 1
+
+
 def infobox(html: str) -> Infobox:
     soup = make_soup(html)
     box = soup.select_one(".infobox")
     if box is None:
         return Infobox()
     info = Infobox()
-    # 名字头通常是带 <big> 英文名的那条；图片头没有
-    head = box.select_one(".infobox-header:has(big)") or box.select_one(".infobox-header")
+    head = _name_row(box)
     if head is not None:
         parts = [p.strip() for p in head.get_text("\n", strip=True).split("\n") if p.strip()]
         if parts:
@@ -71,7 +96,7 @@ def title(html: str) -> str:
     soup = make_soup(html)
     box = soup.select_one(".infobox")
     if box is not None:
-        head = box.select_one(".infobox-header:has(big)") or box.select_one(".infobox-header")
+        head = _name_row(box)
         if head is not None:
             first = head.get_text("\n", strip=True).split("\n")
             if first and first[0].strip():
@@ -157,3 +182,18 @@ def plain_summary(html: str) -> str:
     """A short one-paragraph summary for chat text output."""
     parts = lead(html, limit=1)
     return parts[0] if parts else ""
+
+
+# 头目/怪物类条目：只有这类才启用「阶段/行动方式/变种」的保护
+BOSS_TYPES = ("头目", "怪物", "头目？")
+BOSS_TITLE_PREFIXES = ("实体/",)
+
+
+def is_boss(html: str, title: str) -> bool:
+    """判断条目是否属于头目/怪物（决定是否启用战斗内容保护）。"""
+    if title.startswith(BOSS_TITLE_PREFIXES):
+        return True
+    for name, value in infobox(html).rows:
+        if name == "类型" and any(t in value for t in BOSS_TYPES):
+            return True
+    return False
