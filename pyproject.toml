@@ -1,6 +1,6 @@
 [project]
 name = "nonebot-plugin-isaac-wiki"
-version = "0.2.0"
+version = "0.3.0"
 description = "查询《以撒的结合》中文 wiki 的 NoneBot2 插件（道具/饰品/卡牌/胶囊/角色/怪物/房间/成就）"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -45,7 +45,7 @@ usage = """
 """
 homepage = ""
 supported_adapters = ["~onebot.v11"]
-version = "0.2.0"
+version = "0.3.0"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

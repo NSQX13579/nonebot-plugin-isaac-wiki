@@ -105,6 +105,8 @@ def _fake_render_entry(title, **kwargs):
 @pytest.fixture
 def isolated(monkeypatch, tmp_path):
     """把引擎状态和缓存目录都换成本用例私有的。"""
+    # 默认是链接模式；下面的接线用例验证的是卡片路径，这里显式切过去
+    monkeypatch.setenv("ISAAC_WIKI_MODE", "card")
     monkeypatch.setattr(store, "data_dir", lambda: tmp_path)
     monkeypatch.setattr(engine, "_wiki", _FakeWiki())
     monkeypatch.setattr(engine, "_waiting", 0)
@@ -217,6 +219,36 @@ def test_cfg_uses_plugin_config_and_reads_env(monkeypatch):
     cfg = commands._cfg()
     assert cfg.isaac_wiki_card_width == 812
     assert cfg.isaac_wiki_idle_close_minutes == 10
+
+
+def test_link_mode_never_touches_the_browser(isolated, monkeypatch):
+    """链接模式必须零外网：连浏览器都不该启动。"""
+    monkeypatch.setenv("ISAAC_WIKI_MODE", "link")
+
+    async def boom(*args, **kwargs):
+        raise AssertionError("链接模式不该启动浏览器")
+
+    monkeypatch.setattr(engine, "_get_wiki", boom)
+    bot = _FakeBot()
+
+    asyncio.run(commands._render_with_feedback(bot, _group_event(), "硫磺火"))
+
+    assert len(bot.sent) == 1
+    text = str(bot.sent[0])
+    from urllib.parse import quote
+
+    encoded = quote("硫磺火")
+    assert f"isaac.huijiwiki.com/wiki/{encoded}" in text
+    assert f"index.php?search={encoded}" in text
+
+
+def test_link_and_help_text_are_mode_aware(isolated, monkeypatch):
+    monkeypatch.setenv("ISAAC_WIKI_MODE", "link")
+    assert "链接" in commands._help_text(commands._cfg())
+    assert "没对上条目" in commands._link_text("硫磺火")
+
+    monkeypatch.setenv("ISAAC_WIKI_MODE", "card")
+    assert "卡片" in commands._help_text(commands._cfg())
 
 
 def test_render_feedback_wires_config_into_engine(isolated, monkeypatch):

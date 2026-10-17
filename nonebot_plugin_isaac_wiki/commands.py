@@ -11,6 +11,7 @@ import logging
 import re
 import time
 from pathlib import Path
+from urllib.parse import quote
 
 from nonebot import get_driver, get_plugin_config, on_command, on_message
 from nonebot.adapters import Message
@@ -34,6 +35,11 @@ HELP = (
     "例：以撒 硫磺火 · 以撒 D6 · 以撒 妈心\n"
     "查完会出卡片；卡片下面列出的内容可以回复数字看。"
 )
+LINK_HELP = (
+    "用法：以撒 <道具/角色/怪物/房间…>\n"
+    "例：以撒 硫磺火 · 以撒 D6 · 以撒 妈心\n"
+    "直接给出 wiki 链接（当前是链接模式，不出图）。"
+)
 
 _last_call: dict[tuple[int, int], float] = {}
 
@@ -51,9 +57,21 @@ def _cfg() -> Config:
 
 def _link(canonical: str) -> str:
     safe = canonical.replace(" ", "_")
-    from urllib.parse import quote
-
     return WIKI_BASE + quote(safe)
+
+
+def _link_text(term: str) -> str:
+    """链接模式：一条消息给出条目链接，再附一个搜索入口兜底。"""
+    search = "https://isaac.huijiwiki.com/index.php?search=" + quote(term)
+    return (
+        f"📕 以撒的结合中文 wiki · {term}\n"
+        f"{_link(term)}\n"
+        f"没对上条目？搜一下：{search}"
+    )
+
+
+def _help_text(cfg: Config) -> str:
+    return HELP if cfg.isaac_wiki_mode == "card" else LINK_HELP
 
 
 def _quoted_id(event: GroupMessageEvent) -> int | None:
@@ -153,6 +171,10 @@ async def _render_with_feedback(bot: Bot, event: GroupMessageEvent, term: str,
                                 canonical: str | None = None,
                                 section_label: str = "") -> None:
     cfg = _cfg()
+    if cfg.isaac_wiki_mode != "card":
+        # 链接模式：不联网、不起浏览器，直接给链接
+        await bot.send(event, _link_text(canonical or term))
+        return
     title = canonical or term
     # 回执先发：冷启动要拉浏览器 + 建会话，解析条目这一步本身就可能好几秒；
     # 原来的顺序是「先解析再回执」，解析一挂就变成完全没反应
@@ -303,9 +325,12 @@ async def _handle_query(bot: Bot, event: GroupMessageEvent, arg: Message = Comma
     if not store.is_group_enabled(event.group_id):
         return
     if term in ("帮助", "help", "?"):
-        await isaac.finish(HELP)
+        await isaac.finish(_help_text(cfg))
     if not term:
-        await isaac.finish(HELP)
+        await isaac.finish(_help_text(cfg))
+
+    if cfg.isaac_wiki_mode != "card":
+        await isaac.finish(_link_text(term))
 
     # 限流
     key = (event.group_id, event.user_id)
@@ -336,15 +361,19 @@ switch = on_command("以撒开关", priority=12, permission=SUPERUSER)
 @admin.handle()
 async def _handle_admin(bot: Bot, event: GroupMessageEvent) -> None:
     cfg = _cfg()
-    stats = store.cache_stats()
-    await admin.finish(
-        "以撒 wiki 状态：\n"
-        f"渲染队列：{engine.busy_count()} 个等待\n"
-        f"浏览器空闲：{int(engine.idle_seconds())} 秒"
-        f"（{cfg.isaac_wiki_idle_close_minutes} 分钟不用就关）\n"
-        f"缓存：{stats['count']} 张 / {stats['bytes'] / 1048576:.1f} MB\n"
-        f"本群：{'开启' if store.is_group_enabled(event.group_id) else '关闭'}"
-    )
+    lines = [
+        f"以撒 wiki 状态：模式={cfg.isaac_wiki_mode}",
+        f"本群：{'开启' if store.is_group_enabled(event.group_id) else '关闭'}",
+    ]
+    if cfg.isaac_wiki_mode == "card":
+        stats = store.cache_stats()
+        lines[1:1] = [
+            f"渲染队列：{engine.busy_count()} 个等待",
+            f"浏览器空闲：{int(engine.idle_seconds())} 秒"
+            f"（{cfg.isaac_wiki_idle_close_minutes} 分钟不用就关）",
+            f"缓存：{stats['count']} 张 / {stats['bytes'] / 1048576:.1f} MB",
+        ]
+    await admin.finish("\n".join(lines))
 
 
 @switch.handle()

@@ -6,6 +6,9 @@ class Config(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
 
+    # link = 只回 wiki 链接（不联网、不起浏览器）；card = 出卡片图
+    isaac_wiki_mode: str = "link"
+
     isaac_wiki_headless: bool = True
     isaac_wiki_timeout: float = 30.0
     isaac_wiki_card_width: int = 760
