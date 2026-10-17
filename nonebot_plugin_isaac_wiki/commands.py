@@ -38,7 +38,6 @@ HELP = (
 LINK_HELP = (
     "用法：以撒 <道具/角色/怪物/房间…>\n"
     "例：以撒 硫磺火 · 以撒 D6 · 以撒 妈心\n"
-    "直接给出 wiki 链接（当前是链接模式，不出图）。"
 )
 
 _last_call: dict[tuple[int, int], float] = {}
@@ -94,13 +93,13 @@ def _env_hint(exc: Exception) -> str:
     if "no module named" in text and "playwright" in text:
         return "服务器还没装 playwright：pip install playwright"
     if "executable doesn't exist" in text or "missing dependencies" in text:
-        return "浏览器或系统库没装好：playwright install chromium（必要时 playwright install-deps）"
+        return "浏览器或系统库没装好：playwright install chromium，必要时再跑 playwright install-deps"
     if "no-sandbox" in text or "running as root" in text:
         return "Chromium 在 root 下要关 sandbox：插件已自动加 --no-sandbox，仍报错就查系统库"
     if "cloudflare" in text or "挑战未通过" in text:
-        return ("wiki 的 Cloudflare 没放行（服务器被判成机器人）。按顺序试："
+        return ("wiki 的 Cloudflare 没放行。按顺序试："
                 "① 本版已自动抹无头特征 ② pip install patchright && patchright install chromium"
-                "（装了会自动启用）③ ISAAC_WIKI_HEADLESS=false 配 xvfb-run 有头跑 "
+                "，装了会自动启用 ③ ISAAC_WIKI_HEADLESS=false 配 xvfb-run 有头跑 "
                 "④ ISAAC_WIKI_PROXY=http://127.0.0.1:7890 走代理")
     return ""
 
@@ -112,7 +111,7 @@ def _browser_missing(exc: Exception) -> bool:
 
 
 def _unavailable_text(term: str, exc: Exception) -> str:
-    lines = [f"wiki 暂时连不上（{_cause(exc)}），稍后再试。"]
+    lines = ["wiki 暂时连不上，稍后再试。", f"原因：{_cause(exc)}"]
     hint = _env_hint(exc)
     if hint:
         lines.append(hint)
@@ -131,7 +130,7 @@ def _cause(exc: Exception) -> str:
 
 def _failure_text(head: str, exc: Exception) -> str:
     """失败回复：带上真实原因，环境类问题再补一句怎么办。"""
-    lines = [f"{head}（{_cause(exc)}）"]
+    lines = [head, f"原因：{_cause(exc)}"]
     hint = _env_hint(exc)
     if hint:
         lines.append(hint)
@@ -207,7 +206,7 @@ async def _render_with_feedback(bot: Bot, event: GroupMessageEvent, term: str,
             for i, h in enumerate(hits[:5], 1):
                 lines.append(f"{i} {h.title}")
             await _withdraw(bot, notice_id)
-            await bot.send(event, "\n".join(lines) + f"\n（也可以直接发：以撒 <名称>）")
+            await bot.send(event, "\n".join(lines) + "\n也可以直接发：以撒 <名称>")
             return
         title = canonical
         page = await wiki.fetch(canonical)
@@ -250,7 +249,7 @@ async def _render_with_feedback(bot: Bot, event: GroupMessageEvent, term: str,
         head = f"{head} · {section_label}"
     lines = [f"📕 {head}", _link(canonical)]
     if res.plan.menu:
-        lines.append("还能看（回复数字）：")
+        lines.append("还能看，回复数字：")
         lines += [f"{i} {label}" for i, label in enumerate(res.plan.menu, 1)]
 
     mid = await _send_card(bot, event, res, "\n".join(lines))
@@ -370,7 +369,7 @@ async def _handle_admin(bot: Bot, event: GroupMessageEvent) -> None:
         lines[1:1] = [
             f"渲染队列：{engine.busy_count()} 个等待",
             f"浏览器空闲：{int(engine.idle_seconds())} 秒"
-            f"（{cfg.isaac_wiki_idle_close_minutes} 分钟不用就关）",
+            f"，{cfg.isaac_wiki_idle_close_minutes} 分钟不用就关",
             f"缓存：{stats['count']} 张 / {stats['bytes'] / 1048576:.1f} MB",
         ]
     await admin.finish("\n".join(lines))

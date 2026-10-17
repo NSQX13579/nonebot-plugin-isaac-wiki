@@ -24,7 +24,7 @@ __plugin_meta__ = PluginMetadata(
         "以撒状态       超管：运行状态\n"
         "以撒开关       超管：开关本群查询\n"
         "\n"
-        "默认是链接模式（不出图）。设 ISAAC_WIKI_MODE=card 且环境能访问 wiki 时才出卡片，"
+        "默认是链接模式。设 ISAAC_WIKI_MODE=card 且环境能访问 wiki 时才出卡片，"
         "卡片下方的内容可以回复数字查看。"
     ),
     type="application",

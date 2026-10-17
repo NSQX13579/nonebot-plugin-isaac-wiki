@@ -244,11 +244,11 @@ def test_link_mode_never_touches_the_browser(isolated, monkeypatch):
 
 def test_link_and_help_text_are_mode_aware(isolated, monkeypatch):
     monkeypatch.setenv("ISAAC_WIKI_MODE", "link")
-    assert "链接" in commands._help_text(commands._cfg())
+    assert commands._help_text(commands._cfg()) == commands.LINK_HELP
     assert "没对上条目" in commands._link_text("硫磺火")
 
     monkeypatch.setenv("ISAAC_WIKI_MODE", "card")
-    assert "卡片" in commands._help_text(commands._cfg())
+    assert commands._help_text(commands._cfg()) == commands.HELP
 
 
 def test_render_feedback_wires_config_into_engine(isolated, monkeypatch):
